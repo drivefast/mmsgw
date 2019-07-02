@@ -1,0 +1,8 @@
+configparser
+bottle
+requests
+redis
+hiredis
+rq
+iso8601
+

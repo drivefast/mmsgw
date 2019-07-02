@@ -1,0 +1,23 @@
+[general]
+# the URL where the service website can be accessed
+api_url = https://mmsgw.fakedemosite.com/
+# development port if you want to run application's own website
+# -- do not use in production --
+#api_dev_port = 8080
+# time to live for the messages, while they're getting prepared,
+# transmitted, and until their receipt is confirmed
+#mms_ttl = 3600
+
+[message_storage]
+# redis server conenction for the messages storage
+#host = localhost
+#port = 6379
+#db = 0
+
+[queue_storage]
+# redis server connection for the transmissions rq queue
+#host = localhost
+#port = 6379
+#db = 0
+
+
