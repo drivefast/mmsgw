@@ -8,6 +8,8 @@ import traceback
 from constants import *
 from backend.logger import log
 from backend.storage import rdb
+from backend.util import makeset
+from models.transaction import MMSTransaction
 
 @bottle.get("/mms_message/<msgid>")
 def get_mms_message(msgid):
@@ -21,13 +23,20 @@ def create_mms_message():
     mj = bottle.request.json
     m = MMSMessage()
 
-    m.content_class = mj.get('content_class', "")
     m.report_events_url = mj.get('report_events_url', "")
+
     m.origin = mj.get('origin', "")
-    m.destination = makeset(mj.get("destination"))
-    m.cc = makeset(mj.get('cc'))
-    m.cc = makeset(mj.get('bcc'))
+    m.show_sender = mj.get('show_sender') if type(mj.get('show_sender')) == bool else None
     m.subject = mj.get('subject', "")
+    m.priority = mj.get('priority') if mj.get('priority', "").lower() in ACCEPTED_MESSAGE_PRIORITIES else ""
+    m.expire_after = mj.get('expire_after', 0)
+    m.deliver_latest = mj.get('deliver_latest', 0)
+    m.message_class = mj.get('message_class', "") if mj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
+    m.content_class = mj.get('content_class', "") if mj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
+    m.drm = mj.get('drm') if type(mj.get('drm')) == bool else None
+    m.content_adaptation = mj.get('content_adaptation') if type(mj.get('content_adaptation')) == bool else None
+
+    parts = []
     for pj in mj.get('parts', []):
         if type(pj) is dict:
             p = MMSMessagePart()
@@ -46,8 +55,17 @@ def create_mms_message():
             m.parts.append(pj)
 
     m.save()
-    return m.as_dict()
 
+    tj = mj.get('send')
+    if tj:
+        # caller opted for the message to be sent out right away, build a transmission
+        t = MMSTransaction(message=m.message_id, gateway=tj.get('gateway', DEFAULT_GATEWAY))
+        t.destination = makeset(tj.get("destination"))
+        t.cc = makeset(tj.get('cc'))
+        t.bcc = makeset(tj.get('bcc'))
+        t.nq()
+
+    return m.as_dict()
 
 @bottle.put("/mms_message/<msgid>")
 def update_mms_message(msgid):
@@ -60,17 +78,27 @@ def update_mms_message(msgid):
             m.report_events_url = mj['report_events_url']
         if mj.get('origin'):
             m.origin = mj['origin']
-        if mj.get('destination'):
-            m.destination |= makeset(mj['destination'])
-        if mj.get('cc'):
-            m.cc |= makeset(mj['cc'])
-        if mj.get('bcc'):
-            m.bcc |= makeset(mj['bcc'])
+        if type(mj.get('show_sender')) == bool:
+            m.show_sender = mj.get('show_sender')
         if mj.get('subject'):
             m.subject = mj['subject']
+        if mj.get('priority', "").lower() in ACCEPTED_MESSAGE_PRIORITIES:
+            m.priority = mj['priority']
+        if mj.get('expire_after'):
+            m.expire_after = mj['expire_after']
+        if mj.get('deliver_latest'):
+            m.deliver_latest = mj['deliver_latest'] 
+        if mj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES:
+            m.message_class = mj['message_class']
+        if mj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES:
+            m.content_class = mj['content_class']
+        if type(mj.get('drm')) == bool:
+            m.drm = mj['drm']
+        if type(mj.get('content_adaptation')) == bool:
+            m.content_adaptation = mj['content_adaptation']
         for pj in mj.get('parts', []):
             if pj is None:
-                # first part being null means to reset the mms parts list
+                # first part item being null means to reset the mms parts list
                 m.parts = []
                 continue
             if type(pj) is dict:
@@ -123,24 +151,22 @@ def create_mms_message():
     return p.as_dict()
 
 
-def makeset(val):
-    if isinstance(val, list):
-        return set(val)
-    elif isinstance(val, basestring):
-        return set(val.split(","))
-    return set()
-
 class MMSMessage(object):
 
     message_id = None
-    content_class = ""
     report_events_url = ""
     origin = ""
-    destination = set()
-    cc = set()
-    bcc = set()
+    show_sender = None
     subject = ""
+    priority = ""
+    expire_after = 0
+    deliver_latest = 0
+    message_class = ""
+    content_class = ""
+    drm = None
+    content_adaptation = None
     parts = []
+
 
     def __init__(self, msgid=None):
         if msgid:
@@ -148,33 +174,41 @@ class MMSMessage(object):
         else:
             self.message_id = str(uuid.uuid4()).replace("-", "")
             self.save()
-            rdb.expireat('mms-' + self.message_id, int(time.time()) + MMS_TTL)
+            rdb.expireat('mmsmsg-' + self.message_id, int(time.time()) + MMS_TTL)
 
     def save(self):
     # save to storage
-        rdb.hmset('mms-' + self.message_id, {
-            'content_class': self.content_class,
+        rdb.hmset('mmsmsg-' + self.message_id, {
             'report_events_url': self.report_events_url,
             'origin': self.origin,
-            'destination': ",".join(self.destination),
-            'cc': ",".join(self.cc),
-            'bcc': ",".join(self.bcc),
+            'show_sender': -1 if self.show_sender is None else 1 if self.show_sender else 0,
             'subject': self.subject,
+            'priority': self.priority,
+            'expire_after': self.expire_after,
+            'deliver_latest': self.deliver_latest,
+            'message_class': self.message_class,
+            'content_class': self.content_class,
+            'drm': -1 if self.drm else 1 if self.drm else 0,
+            'content_adaptation': self.content_adaptation if self.content_adaptation is None else 1 if self.content_adaptation else 0,
             'parts': ",".join(self.parts),
         })
 
     def load(self, msgid):
     # load from storage
-        msg = rdb.hgetall('mms-' + msgid)
+        msg = rdb.hgetall('mmsmsg-' + msgid)
         if msg:
             self.message_id = msgid
-            self.content_class = msg.get('content_class', "")
             self.report_events_url = msg.get('report_events_url', "")
             self.origin = msg.get('origin', "")
-            self.destination = set(msg.get('destination', "").split(","))
-            self.cc = set(msg.get('cc', "").split(","))
-            self.bcc = set(msg.get('bcc', "").split(","))
+            self.show_sender = msg.get('show_sender')
             self.subject = msg.get('subject', "")
+            self.priority = msg.get('priority', "")
+            self.expire_after = msg.get('expire_after', 0)
+            self.deliver_latest = msg.get('deliver_latest', 0)
+            self.message_class = msg.get('message_class', "")
+            self.content_class = msg.get('content_class', "")
+            self.drm = msg.get('drm', "")
+            self.content_adaptation = msg.get('content_adaptation', "")
             self.parts = msg.get('parts', "").split(",")
 
 
@@ -190,9 +224,6 @@ class MMSMessage(object):
             'content_class': self.content_class,
             'report_events_url': self.report_events_url,
             'origin': self.origin,
-            'destination': list(self.destination),
-            'cc': list(self.cc),
-            'bcc': list(self.bcc),
             'subject': self.subject,
             'parts': []
         }

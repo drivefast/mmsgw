@@ -38,13 +38,3 @@ except Exception as err:
     )
     rdbq = None
 
-tx_queue = None
-events_queue = None
-if rdbq:
-    tx_queue = {
-        'TOP': rq.Queue("TOP", connection=rdbq),
-        'HIGH': rq.Queue("HIGH", connection=rdbq),
-        'NORMAL': rq.Queue("NORMAL", connection=rdbq),
-    }
-    events_queue = rq.Queue("EVENTS", connection=rdbq)
-
