@@ -7,6 +7,8 @@ api_url = https://mmsgw.fakedemosite.com/
 # time to live for the messages, while they're getting prepared,
 # transmitted, and until their receipt is confirmed
 #mms_ttl = 3600
+# distribution of messages in a gateway group: RND, RR, PREF, LU, LRU
+gateway_group_distribution = RND
 
 [message_storage]
 # redis server conenction for the messages storage
@@ -15,7 +17,7 @@ api_url = https://mmsgw.fakedemosite.com/
 #db = 0
 
 [queue_storage]
-# redis server connection for the transmissions rq queue
+# redis server connection for the gateway rq queues
 #host = localhost
 #port = 6379
 #db = 0

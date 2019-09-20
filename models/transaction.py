@@ -11,7 +11,7 @@ from models.gateway import MMSGateway
 @bottle.post("/mms_send/<msgid>")
 def enqueue_mms_transaction(msgid):
     tj = bottle.request.json
-    tx = MMSTransaction(msgid=msgid, gateway=tj.get('gateway'))
+    tx = MMSTransaction(msgid=msgid)
 
     tx.destination = makeset(tj.get("destination"))
     tx.cc = makeset(tj.get('cc'))
@@ -21,15 +21,14 @@ def enqueue_mms_transaction(msgid):
         return json_error(400, "Bad request", "No destinations")
 
     tx.save()
-    tx.nq()
+    tx.nq(tj.get('gateway'))
     return tx.to_dict()
 
 
 class MMSTransaction(object):
 
     tx_id = None
-    message_id = None
-    gateway = None
+    message = None
     gateway_id = None
     destination = set()
     cc = set()
@@ -44,12 +43,11 @@ class MMSTransaction(object):
     read_reply_status = ""
     send_error = ""
 
-    def __init__(self, txid=None, msgid=None, gateway=None):
+    def __init__(self, txid=None, msgid=None):
         if txid is None:
             self.tx_id = str(uuid.uuid4()).replace("-", "")
             self.created_ts = int(time.time())
-            self.message_id = msgid
-            self.gateway = gateway
+            self.message = MMSMessage(msgid)
             self.save()
             rdb.expireat('mmstx-' + self.tx_id, int(time.time()) + MMSTX_TTL)
         else:
@@ -58,9 +56,8 @@ class MMSTransaction(object):
 
     def save(self):
         rdb.hmset('mmstx-' + self.tx_id, {
-            'message_id': self.message_id,
-            'g`ateway': self.gateway,
-            'g`ateway_id': self.gateway_id,
+            'message_id': self.message.message_id,
+            'gateway_id': self.gateway_id,
             'destination': ",".join(self.destination),
             'cc': ",".join(self.cc),
             'bcc': ",".join(self.bcc),
@@ -80,8 +77,7 @@ class MMSTransaction(object):
         tx = rdb.hgetall('mmstx-' + txid)
         if tx:
             self.tx_id = txid
-            self.message_id = tx['message_id']
-            self.gateway = tx['gateway']
+            self.message = MMSMessage(tx['message_id'])
             self.gateway_id = tx['gateway_id']
             self.destination = set(tx.get('destination', "").split(","))
             self.cc = set(tx.get('cc', "").split(","))
@@ -100,8 +96,7 @@ class MMSTransaction(object):
     def to_dict(self):
         return {
             'transaction_id': self.tx_id,
-            'message_id': self.message_id,
-            'gateway': self.gateway,
+            'message_id': self.message.message_id,
             'gateway_id': self.gateway_id,
             'destination': list(self.destination),
             'cc': list(self.cc),
@@ -118,18 +113,12 @@ class MMSTransaction(object):
         }
 
         
-    def nq(self):
+    def nq(self, gateway):
         # pick the appropriate gateway
-        if self.gateway in GATEWAY_GROUPS:
-            self.gateway_id = MMSGateway.select_from_group(self.gateway)
-        elif self.gateway is not None:
-            self.gateway_id = self.gateway
-        else:
-            self.gateway_id = DEFAULT_GATEWAY
+        self.gateway_id = MMSGateway.dispatch(gateway, "TX") or gateway or DEFAULT_GATEWAY
         self.save()
 
-        gw = MMSGateway(self.gateway_id)
-        gw.q_tx.enqueue(
+        MMSGateway(self.gateway_id).q_tx.enqueue(
             func='models.gateway.send_mms', args=(self.tx_id), job_id=self.tx_id
         )
 

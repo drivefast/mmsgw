@@ -1,0 +1,64 @@
+[gateway]
+# gateway protocol: MM4 or MM7
+protocol=MM4
+# register this gateway to a group
+group=
+# max MM4 or MM7 version supported by this gateway
+version=
+# soft indicator of the carrier name this gateway connects to, info only
+carrier=
+# limit this gateway to this many transactions per second, for MT sending
+tps_limit=
+# MM7 only: VAS ID and VASP ID
+vaspid=
+vasid=
+
+[outbound]
+# does your peer require a secure connection? yes/no
+secure_connection=
+# remote host to send MTs
+remote_host=
+remote_port=
+# credentials for connecting to remote host
+username=
+password=
+# MM4 only: keyfile and cert file of this SMTP server
+keyfile=
+certfile=
+# abandon connection with an error, if not established in this many seconds
+connection_timeout=
+# local hostname (fqdn)
+local_host=
+
+[inbound]
+# MM4 only: domain and hostname to be monitored for incoming MM4 messages
+domain=
+host=
+
+[addressing]
+# prefix and suffix to be added to the destination phone number
+dest_prefix=
+dest_suffix=
+# prefix and suffix to be added to the origination phone number
+origin_prefix=
+origin_suffix=
+
+[features]
+# request remote MMSC to send delivery progress events (yes/no)
+request_submit_ack=
+request_delivery=
+request_read_receipt=
+# name of the origination (our own) system
+originator_system=
+# MM4 only: send delivery progress events to this email address
+originator_recipient_address=
+# identify the sending application ID, an application ID that would be handling replies, and another generic application ID
+applic_id=
+reply_applic_id=
+aux_applic_info=
+# MM4 only: see docs
+mmsip_address=
+forward_route=
+return_route=
+
+

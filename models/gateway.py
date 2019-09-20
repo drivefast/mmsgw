@@ -1,11 +1,12 @@
 import time
 import rq
 import smtplib
-import smtpd
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 
 from backend.storage import rdbq
 from models.transaction import MMSTransaction
-from models.message import Message
+from models.message import MMSMessage
 
 
 def send_mms(txid):
@@ -13,7 +14,7 @@ def send_mms(txid):
     if tx is None:
         log.warning("[{}] Transaction not found when attempting to send".format(txid))
         return
-    
+    gw = MMSGateway(tx.gateway_id)
     m = gw.render(tx)
     gw.transmit(m)
 
@@ -22,6 +23,7 @@ class MMSGateway(object):
 
     gwid = None
     q_tx = None
+    q_rx = None
     q_ev = None
 
     # gateway
@@ -65,10 +67,71 @@ class MMSGateway(object):
     forward_route = None                  # MM4 only
     return_route = None                   # MM4 only
 
+    
+    @classmethod
+    def group(cls, group, task_type="TX"):
+        gateways = []
+        all_gateways = Worker.all_keys(connection=rdbq)
+        for gwid in all_gateways:
+            gw = rdbq.hgetall("gw-" + gwid + "-" + task_type)
+            if gw is not None and gw_worker['group'] == group:
+                gateways.append(gw)
+        return gateways;
+
 
     @classmethod
-    def select_from_group(cls, group):
-        return "blah"
+    def dispatch(cls, group, task_type):
+        gateways = []
+        gw_last = None
+        gw_load = {}
+        gw_last_used = {}
+        all_gateways = Worker.all_keys(connection=rdbq)
+        for gwid in all_gateways
+            gw = rdbq.hgetall("gw-" + gwid + "-" + task_type)
+            if gw is not None and gw_worker['group'] == group:
+                gateways.append(gwid)
+                if gw['last_selected'] == 1:
+                    rdbq.hmset("gw-" + gwid + "-" + task_type, 'last_selected', 0)
+                    gw_last = gwid
+                gw_load[gwid] = gw['n_tasks']
+                gw_last_used[gwid] = gw['last_task_ts']
+
+        if len(gateways) == 0:
+            return None
+        gwid = ""
+        if GW_GROUP_DISTRIBUTION == "RR":
+            # get alphabetically ordered list of gwid's, select first after last selected, move last_selected
+            gwids = sorted(gateways)
+            if gw_last is None:
+                gwid = gateways[0]
+            else:
+                for gwix in range(len(gwids)):
+                    if gwids[gwix] == gw_last:
+                        gwid = gwids[(1 + gwix) % len(gwids)]
+                        break
+        elif GW_GROUP_DISTRIBUTION == "PREF":
+            # select first gateway in alphabetically ordered list of gateway IDs
+            gwid = sorted(gateways)[0]
+        elif GW_GROUP_DISTRIBUTION == "LU":
+            # select the gateway that had the least tasks assigned
+            gw_lu = sorted(gw_load.items(), key=lambda(k): k[1])
+            gwid = gw_lu[0][0]
+        elif GW_GROUP_DISTRIBUTION == "LRU":
+            # select the gateway that as the last to get assigned a task
+            gw_lru = sorted(gw_last_used.items(), key=lambda(k): k[1])
+            gwid = gw_lru[0][0]
+        else:
+            # select an arbitrary gateway from the group
+            gwid = random.choice(gateways())
+
+        # adjust gateway records in group, after selecting this gateway
+        rdbq.hmset("gw-" + gwid + "-" + task_type, {
+            'last_selected': 1,
+            'last_task_ts': int(time.time(),
+        })
+        rdbq.hincrby("gw-" + gwid + "-" + task_type, 'n_tasks', 1)
+
+        return gwid
 
 
     def __init__(self, gwid):
@@ -79,7 +142,6 @@ class MMSGateway(object):
 
 
     def config(self, cfg):
-        self.group = cfg['gateway'].get('group')
         self.potocol_version = cfg['gateway'].get('version')
         self.carrier = cfg['gateway'].get('carrier', "")
         self.tps_limit = int(cfg['gateway'].get('tps_limit', 0))
@@ -104,11 +166,23 @@ class MMSGateway(object):
         self.aux_applic_info = cfg['features'].get('aux_applic_info')
 
 
-    def register_to_group():
-        if self.group:
-            rdbq.hmset('gwgrp-' + self.group, self.gwid, int(time.time()))
-
-
+    def register(group=None):
+        if group:
+            self.group = group
+            for task_type in [ "RX", "TX", "EV" ]:
+                rdbq.hmset("gw-" + self.gwid + "-" + task_type, {
+                    'group': self.group,
+                    'last_selected': 1,
+                    'last_task_ts': 0,
+                    'n_tasks': 0,
+                })
+                for gwid in MMSGateway.group(self.group, task_type).keys():
+                    rdbq.hmset("gw-" + gwid + "-" + task_type, {
+                        'last_selected': 0,
+                        'last_task_ts': 0,
+                        'n_tasks': 0,
+                    })
+                    
 
 class MM4Gateway(MMSGateway):
 
@@ -129,8 +203,8 @@ class MM4Gateway(MMSGateway):
         self.mmsip_address = cfg['features'].get('mmsip_address')
         self.forward_route = cfg['features'].get('forward_route')
         self.return_route = cfg['features'].get('return_route')
-        keyfile = cfg[gwid].get('keyfile')
-        certfile = cfg[gwid].get('certfile')
+        keyfile = cfg['outbound'].get('keyfile')
+        certfile = cfg['outbound'].get('certfile')
         if keyfile is not None and certfile is not None and self.secure_connection:
             self.ssl_certificate = ( keyfile, certfile )
         self.peer_domain = cfg['inbound'].get('domain')
@@ -164,6 +238,46 @@ class MM4Gateway(MMSGateway):
         rdbq.sadd('mmsrxsource-' + self.peer_host, self.gwid)
 
         return ok
+
+
+    def render(self, tx):
+        e = MIMEMultipart("related")
+
+        e['From'] = self.origin_prefix + tx.message.origin + self.origin_suffix
+        e['Sender'] = self.origin_prefix + tx.message.origin + self.origin_suffix
+        e['Subject'] = tx.message.subject
+        e['To'] = ",".join(tx.destination)
+        e['Cc'] = ",".join(tx.cc)
+        e['Bcc'] = ",".join(tx.bcc)
+        
+        for p in message.parts:
+            content = p.content or download(p.content_url)
+            if content = None:
+                continue
+            if p.content_type == "application/smil":
+                mp = MIMEBase("application", "smil", name=p.attachment_name)
+                mp.set_payload(content)
+                mp.add_header("Content-Id", p.content_id)
+                e.set_param("start", p.content_id)
+                e.attach(mp)
+            elif p.content_type == "text/plain":
+                mp = MIMEText(content)
+                mp.add_header("Content-Id", p.content_id)
+                e.attach(mp)
+            elif p.content_type.startswith("image/"):
+                fh.open(content[1:])
+                mp = MIMEImage(fh.read())
+                fh.close()
+                mp.add_header("Content-Id", p.content_id)
+                e.attach(mp)
+            elif p.content_type.startswith("audio/"):
+                fh.open(content[1:])
+                mp = MIMEAudio(fh.read())
+                fh.close()
+                mp.add_header("Content-Id", p.content_id)
+                e.attach(mp)
+
+
 
 
 class MM7Gateway(MMSGateway):

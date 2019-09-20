@@ -50,7 +50,11 @@ def create_mms_message():
             p.content_id = pj.get('content_id', "")
             p.attachment_name = pj.get('attachment_name', "")
             p.save()
-            m.parts.append(p.part_id)
+            if p.content_type == "application/smil":
+                # need to keep the smil in first position
+                m.parts.insert(0, p.part_id)
+            else:
+                m.parts.append(p.part_id)
         elif isinstance(pj, basestring) and rdb.exists("mmspart-" + pj):
             m.parts.append(pj)
 
@@ -113,7 +117,11 @@ def update_mms_message(msgid):
                 p.content_id = pj.get('content_id', "")
                 p.attachment_name = pj.get('attachment_name', "")
                 p.save()
-                m.parts.append(p.part_id)
+                if p.content_type == "application/smil":
+                    # need to keep the smil in first position
+                    m.parts.insert(0, p.part_id)
+                else:
+                    m.parts.append(p.part_id)
             elif isinstance(pj, basestring) and rdb.exists("mmspart-" + pj):
                 m.parts.append(pj)
 
@@ -129,7 +137,6 @@ def get_mms_message(partid):
     if p is None:
         return json_error(404, "Not found", "MMS message part '{}' not found".format(partid))
     p['part_id'] = partid
-    p['base64'] = p['base64'] == 1
     return p
 
 
@@ -242,7 +249,6 @@ class MMSMessagePart(object):
     content_id = ""
     content_type = ""
     attachment_name = ""
-    base64 = False
 
     def __init__(self, pid=None):
         if pid:
@@ -260,7 +266,6 @@ class MMSMessagePart(object):
             'content_id': self.content_id,
             'content_type': self.content_type,
             'attachment_name': self.attachment_name,
-            'base64': 1 if self.base64 else 0
         })
 
     def load(self, pid):
@@ -273,7 +278,6 @@ class MMSMessagePart(object):
             self.content_id = p.get('content_id', "")
             self.content_type = p.get('content_type', "")
             self.attachment_name = p.get('attachment_name', "")
-            self.base64 = p.get('base64', "0") == 1
 
     def as_email_part(self):
         return None
@@ -289,6 +293,5 @@ class MMSMessagePart(object):
             'content_id': self.content_id,
             'content_type': self.content_type,
             'attachment_name': self.attachment_name,
-            'base64': self.base64
         }
 
