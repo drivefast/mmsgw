@@ -18,6 +18,8 @@ class Logger:
         syslog.syslog(syslog.LOG_WARNING, "[WARNING] " + str(message))
     def error(self, message):
         syslog.syslog(syslog.LOG_ERR, "[ERROR] " + str(message))
+    def critical(self, message):
+        syslog.syslog(syslog.LOG_CRIT, "[CRITICAL] " + str(message))
     def alarm(self, message):
         syslog.syslog(syslog.LOG_ALERT, "[ALARM] " + str(message))
 

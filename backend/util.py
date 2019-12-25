@@ -5,7 +5,9 @@ import json
 import iso8601
 import bottle
 import datetime
+import requests
 
+from constants import TEMPORARY_FILES_DIR
 
 def makeset(val):
     if isinstance(val, list):
@@ -14,6 +16,17 @@ def makeset(val):
         return set(val.split(","))
     return set()
 
+
+def download_to_file(url, save_as=None):
+    fn = save_as or "/tmp/" + random_string(12)
+    rp = requests.get(url, stream=True)
+    if rp.status_code == 200:
+        with open(fn, 'wb') as fh:
+            for chunk in rp.iter_content(1024):
+                fh.write(chunk)    
+    else:
+        return None
+    return fn
 
 def isodate(iso_timestamp):
     return int(time.mktime(iso8601.parse_date(iso_timestamp).timetuple()))

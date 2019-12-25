@@ -1,7 +1,8 @@
 [gateway]
 # gateway protocol: MM4 or MM7
 protocol=MM4
-# register this gateway to a group
+# give this gateway a name, and register it to a group
+name=
 group=
 # max MM4 or MM7 version supported by this gateway
 version=
@@ -25,8 +26,6 @@ password=
 # MM4 only: keyfile and cert file of this SMTP server
 keyfile=
 certfile=
-# abandon connection with an error, if not established in this many seconds
-connection_timeout=
 # local hostname (fqdn)
 local_host=
 

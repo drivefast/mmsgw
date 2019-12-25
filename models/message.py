@@ -11,6 +11,7 @@ from backend.storage import rdb
 from backend.util import makeset
 from models.transaction import MMSTransaction
 
+
 @bottle.get("/mms_message/<msgid>")
 def get_mms_message(msgid):
     m = MMSMessage(msgid)
@@ -26,15 +27,22 @@ def create_mms_message():
     m.report_events_url = mj.get('report_events_url', "")
 
     m.origin = mj.get('origin', "")
-    m.show_sender = mj.get('show_sender') if type(mj.get('show_sender')) == bool else None
+    if type(mj.get('show_sender')) == bool:
+        m.show_sender = 1 if mj.['show_sender'] else -1
     m.subject = mj.get('subject', "")
-    m.priority = mj.get('priority') if mj.get('priority', "").lower() in ACCEPTED_MESSAGE_PRIORITIES else ""
+    m.earliest_delivery = mj.get('earliest_delivery', 0)
     m.expire_after = mj.get('expire_after', 0)
     m.deliver_latest = mj.get('deliver_latest', 0)
     m.message_class = mj.get('message_class', "") if mj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
     m.content_class = mj.get('content_class', "") if mj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
-    m.drm = mj.get('drm') if type(mj.get('drm')) == bool else None
-    m.content_adaptation = mj.get('content_adaptation') if type(mj.get('content_adaptation')) == bool else None
+    m.charged_party = mj.get('charged_party', "") if mj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY else ""
+    if type(mj.get('drm')) == bool:
+        m.drm = 1 if mj['drm'] else -1
+    if type(mj.get('content_adaptation')) == bool:
+        m.content_adaptation = 1 if mj.get('content_adaptation') else -1
+    if type(mj.get('can_redistribute')) == bool:
+        m.can_redistribute = 1 if mj.get('can_redistribute') else -1
+
 
     parts = []
     for pj in mj.get('parts', []):
@@ -83,23 +91,28 @@ def update_mms_message(msgid):
         if mj.get('origin'):
             m.origin = mj['origin']
         if type(mj.get('show_sender')) == bool:
-            m.show_sender = mj.get('show_sender')
+            m.show_sender = 1 if mj['show_sender'] else -1
         if mj.get('subject'):
             m.subject = mj['subject']
-        if mj.get('priority', "").lower() in ACCEPTED_MESSAGE_PRIORITIES:
-            m.priority = mj['priority']
+        if mj.get('earliest_delivery'):
+            m.earliest_delivery = mj['earliest_delivery']
         if mj.get('expire_after'):
             m.expire_after = mj['expire_after']
         if mj.get('deliver_latest'):
             m.deliver_latest = mj['deliver_latest'] 
         if mj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES:
-            m.message_class = mj['message_class']
+            m.message_class = mj['message_class'].lower()
         if mj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES:
-            m.content_class = mj['content_class']
+            m.content_class = mj['content_class'].lower()
+        if mj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY:
+            m.charged_party = mj['charged_party'].lower()
         if type(mj.get('drm')) == bool:
-            m.drm = mj['drm']
+            m.drm = 1 if mj['drm'] else -1
         if type(mj.get('content_adaptation')) == bool:
-            m.content_adaptation = mj['content_adaptation']
+            m.content_adaptation = 1 if mj['content_adaptation'] else -1
+        if type(mj.get('can_redistribute')) == bool:
+            m.can_redistribute = 1 if mj['can_redistribute'] else -1
+
         for pj in mj.get('parts', []):
             if pj is None:
                 # first part item being null means to reset the mms parts list
@@ -162,16 +175,19 @@ class MMSMessage(object):
 
     message_id = None
     report_events_url = ""
+    ascii_rendering = None
     origin = ""
-    show_sender = None
+    show_sender = 0
     subject = ""
-    priority = ""
+    earliest_delivery = 0
     expire_after = 0
     deliver_latest = 0
+    charged_party = ""
     message_class = ""
     content_class = ""
-    drm = None
-    content_adaptation = None
+    drm = 0
+    content_adaptation = 0
+    can_redistribute = 0
     parts = []
 
 
@@ -188,15 +204,17 @@ class MMSMessage(object):
         rdb.hmset('mmsmsg-' + self.message_id, {
             'report_events_url': self.report_events_url,
             'origin': self.origin,
-            'show_sender': -1 if self.show_sender is None else 1 if self.show_sender else 0,
+            'show_sender': self.show_sender,
             'subject': self.subject,
-            'priority': self.priority,
+            'earliest_delivery': self.earliest_delivery,
             'expire_after': self.expire_after,
             'deliver_latest': self.deliver_latest,
+            'charged_party': self.charged_party,
             'message_class': self.message_class,
             'content_class': self.content_class,
-            'drm': -1 if self.drm else 1 if self.drm else 0,
-            'content_adaptation': self.content_adaptation if self.content_adaptation is None else 1 if self.content_adaptation else 0,
+            'drm': self.drm,
+            'content_adaptation': self.content_adaptation,
+            'can_redistribute': self.can_redistribute,
             'parts': ",".join(self.parts),
         })
 
@@ -207,15 +225,17 @@ class MMSMessage(object):
             self.message_id = msgid
             self.report_events_url = msg.get('report_events_url', "")
             self.origin = msg.get('origin', "")
-            self.show_sender = msg.get('show_sender')
+            self.show_sender = msg.get('show_sender', 0)
             self.subject = msg.get('subject', "")
-            self.priority = msg.get('priority', "")
+            self.earliest_delivery = msg.get('earliest_delivery', 0)
             self.expire_after = msg.get('expire_after', 0)
             self.deliver_latest = msg.get('deliver_latest', 0)
+            self.charged_party = msg.get('charged_party', "")
             self.message_class = msg.get('message_class', "")
             self.content_class = msg.get('content_class', "")
-            self.drm = msg.get('drm', "")
-            self.content_adaptation = msg.get('content_adaptation', "")
+            self.drm = msg.get('drm', 0)
+            self.content_adaptation = msg.get('content_adaptation', 0)
+            self.can_redistribute = msg.get('can_redistribute', 0)
             self.parts = msg.get('parts', "").split(",")
 
 

@@ -20,6 +20,10 @@ def itworks():
 #def confirm_auth(agent):
 #    return "I'm the MMS gateway API, and your agent {} is authorized!".format(agent)
 
+@bottle.get("/covfefe.png")
+def serve_covfefe():
+    return static_file("covfefe.png", root="")
+
 
 if __name__ == '__main__':
     bottle.run(host="0.0.0.0", port=API_DEV_PORT, reloader=True)

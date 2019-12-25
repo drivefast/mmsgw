@@ -1,11 +1,12 @@
 import uuid
 import time
+import bottle
 
 from constants import *
 from backend.logger import log
 from backend.storage import rdb
 from backend.util import makeset
-from models.gateway import MMSGateway
+import models.gateway
 
 
 @bottle.post("/mms_send/<msgid>")
@@ -20,6 +21,10 @@ def enqueue_mms_transaction(msgid):
     if (len(tx.destination) + len(tx.cc) + len(tx.cc)) == 0:
         return json_error(400, "Bad request", "No destinations")
 
+    tx.linked_id = tj.get('linked_id')
+    pri = tj.get('priority', "").lower()
+    tx.priority = pri if pri in ACCEPTED_MESSAGE_PRIORITIES else "normal"
+
     tx.save()
     tx.nq(tj.get('gateway'))
     return tx.to_dict()
@@ -33,6 +38,8 @@ class MMSTransaction(object):
     destination = set()
     cc = set()
     bcc = set()
+    linked_id = None
+    priority = ""
     created_ts = 0
     sent_ts = 0
     forwarded_ts = 0
@@ -61,6 +68,8 @@ class MMSTransaction(object):
             'destination': ",".join(self.destination),
             'cc': ",".join(self.cc),
             'bcc': ",".join(self.bcc),
+            'linked_id': self.linked_id,
+            'priority': self.priority,
             'created_ts': self.created_ts,
             'sent_ts': self.sent_ts,
             'forwarded_ts': self.forwarded_ts,
@@ -82,8 +91,10 @@ class MMSTransaction(object):
             self.destination = set(tx.get('destination', "").split(","))
             self.cc = set(tx.get('cc', "").split(","))
             self.bcc = set(tx.get('bcc', "").split(","))
+            self.linked_id = tx['linked_id']
             self.created_ts = tx['created_ts']
             self.sent_ts = tx['sent_ts']
+            self.priority = tx['priority']
             self.forwarded_ts = tx['forwarded_ts']
             self.forwarded_status = tx['forwarded_status']
             self.delivered_ts = tx['delivered_ts']
@@ -101,6 +112,8 @@ class MMSTransaction(object):
             'destination': list(self.destination),
             'cc': list(self.cc),
             'bcc': list(self.bcc),
+            'linked_id': self.linked_id,
+            'priority': self.priority,
             'created_ts': self.created_ts,
             'sent_ts': self.sent_ts,
             'forwarded_ts': self.forwarded_ts,
@@ -115,11 +128,15 @@ class MMSTransaction(object):
         
     def nq(self, gateway):
         # pick the appropriate gateway
-        self.gateway_id = MMSGateway.dispatch(gateway, "TX") or gateway or DEFAULT_GATEWAY
+        self.gateway_id = models.gateway.MMSGateway.dispatch(gateway, "TX") or gateway or DEFAULT_GATEWAY
         self.save()
 
-        MMSGateway(self.gateway_id).q_tx.enqueue(
-            func='models.gateway.send_mms', args=(self.tx_id), job_id=self.tx_id
+        tx_job = rq.Job.create(
+            func='models.gateway.send_mms', args=(self.tx_id), 
+            id=self.tx_id,
+            meta={ 'retries': MAX_TX_RETRIES },
+            ttl=30
         )
+        models.gateway.MMSGateway(self.gateway_id).q_tx.enqueue(tx_job)
 
 
