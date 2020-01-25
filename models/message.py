@@ -9,26 +9,26 @@ from constants import *
 from backend.logger import log
 from backend.storage import rdb
 from backend.util import makeset
-from models.transaction import MMSTransaction
+import models.transaction
 
 
-@bottle.get("/mms_message/<msgid>")
+@bottle.get(URL_ROOT + "/mms_message/<msgid>")
 def get_mms_message(msgid):
     m = MMSMessage(msgid)
     return m.as_dict() if m else \
         json_error(404, "Not found", "MMS message '{}' not found".format(msgid))
 
 
-@bottle.post("/mms_message")
+@bottle.post(URL_ROOT + "/mms_message")
 def create_mms_message():
     mj = bottle.request.json
     m = MMSMessage()
 
-    m.report_events_url = mj.get('report_events_url', "")
+    m.report_events_address = mj.get('report_events_address', "")
 
     m.origin = mj.get('origin', "")
     if type(mj.get('show_sender')) == bool:
-        m.show_sender = 1 if mj.['show_sender'] else -1
+        m.show_sender = 1 if mj['show_sender'] else -1
     m.subject = mj.get('subject', "")
     m.earliest_delivery = mj.get('earliest_delivery', 0)
     m.expire_after = mj.get('expire_after', 0)
@@ -71,7 +71,7 @@ def create_mms_message():
     tj = mj.get('send')
     if tj:
         # caller opted for the message to be sent out right away, build a transmission
-        t = MMSTransaction(message=m.message_id, gateway=tj.get('gateway', DEFAULT_GATEWAY))
+        t = models.transaction.MMSTransaction(message=m.message_id, gateway=tj.get('gateway', DEFAULT_GATEWAY))
         t.destination = makeset(tj.get("destination"))
         t.cc = makeset(tj.get('cc'))
         t.bcc = makeset(tj.get('bcc'))
@@ -79,15 +79,13 @@ def create_mms_message():
 
     return m.as_dict()
 
-@bottle.put("/mms_message/<msgid>")
+@bottle.put(URL_ROOT + "/mms_message/<msgid>")
 def update_mms_message(msgid):
     m = MMSMessage(msgid)
     if m:
         mj = bottle.request.json
-        if mj.get('content_class'):
-            m.content_class = mj['content_class']
-        if mj.get('report_events_url'):
-            m.report_events_url = mj['report_events_url']
+        if mj.get('report_events_address'):
+            m.report_events_address = mj['report_events_address']
         if mj.get('origin'):
             m.origin = mj['origin']
         if type(mj.get('show_sender')) == bool:
@@ -144,7 +142,7 @@ def update_mms_message(msgid):
         json_error(404, "Not found", "MMS message '{}' not found".format(msgid))
 
 
-@bottle.get("/mms_part/<partid>")
+@bottle.get(URL_ROOT + "/mms_part/<partid>")
 def get_mms_message(partid):
     p = rdb.hgetall('mmspart-' + partid)
     if p is None:
@@ -153,7 +151,7 @@ def get_mms_message(partid):
     return p
 
 
-@bottle.post("/mms_part")
+@bottle.post(URL_ROOT + "/mms_part")
 def create_mms_message():
     pj = bottle.request.json
     p = MMSMessagePart()
@@ -174,7 +172,7 @@ def create_mms_message():
 class MMSMessage(object):
 
     message_id = None
-    report_events_url = ""
+    report_events_address = ""
     ascii_rendering = None
     origin = ""
     show_sender = 0
@@ -202,7 +200,7 @@ class MMSMessage(object):
     def save(self):
     # save to storage
         rdb.hmset('mmsmsg-' + self.message_id, {
-            'report_events_url': self.report_events_url,
+            'report_events_address': self.report_events_address,
             'origin': self.origin,
             'show_sender': self.show_sender,
             'subject': self.subject,
@@ -223,7 +221,7 @@ class MMSMessage(object):
         msg = rdb.hgetall('mmsmsg-' + msgid)
         if msg:
             self.message_id = msgid
-            self.report_events_url = msg.get('report_events_url', "")
+            self.report_events_address = msg.get('report_events_address', "")
             self.origin = msg.get('origin', "")
             self.show_sender = msg.get('show_sender', 0)
             self.subject = msg.get('subject', "")
@@ -249,7 +247,7 @@ class MMSMessage(object):
         ret = {
             'message_id': self.message_id,
             'content_class': self.content_class,
-            'report_events_url': self.report_events_url,
+            'report_events_address': self.report_events_address,
             'origin': self.origin,
             'subject': self.subject,
             'parts': []
@@ -265,7 +263,7 @@ class MMSMessagePart(object):
 
     part_id = None
     content_url = ""
-    content = ""
+    content = None
     content_id = ""
     content_type = ""
     attachment_name = ""
@@ -282,11 +280,14 @@ class MMSMessagePart(object):
     # save to storage
         rdb.hmset('mmspart-' + self.part_id, {
             'content_url': self.content_url,
-            'content': self.content,
             'content_id': self.content_id,
             'content_type': self.content_type,
             'attachment_name': self.attachment_name,
         })
+        if self.content is not None:
+            rdb.hset('mmspart-' + self.part_id, 'content', self.content)
+        else:
+            rdb.hdel('mmspart-' + self.part_id, 'content')
 
     def load(self, pid):
     # load from storage
@@ -294,7 +295,7 @@ class MMSMessagePart(object):
         if p:
             self.part_id = pid
             self.content_url = p.get('content_url', "")
-            self.content = p.get('content', "")
+            self.content = p.get('content')
             self.content_id = p.get('content_id', "")
             self.content_type = p.get('content_type', "")
             self.attachment_name = p.get('attachment_name', "")

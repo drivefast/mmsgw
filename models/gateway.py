@@ -3,32 +3,29 @@ import datetime
 import uuid
 import base64
 import rq
+import os.path
+import shutil
+
+import traceback
 
 import xml.etree.cElementTree as ET
 import smtplib
 import email
 import mimetypes
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
+from email.mime.audio import MIMEAudio
 
 from constants import *
 from backend.logger import log
-from backend.util import download_to_file
+from backend.util import download_to_file, repo
 from backend.storage import rdbq
 import models.transaction
 import models.message
 
-
 MM7_ROOT_NS = "soapenv"
-MM7_VERSION = {
-    'mm7': "6.8.0",
-    'xmlns_suffix': "REL-6-MM7-1-4",
-}
-MM7_NAMESPACE = {
-    'env': "http://schemas.xmlsoap.org/soap/envelope/",
-    'mm7': "http://www.3gpp.org/ftp/Specs/archive/23_series/23.140/schema/" + VERSION['xmlns_suffix'],
-}
 MM7_STATUS = {
     '1000': "Success",
     '1100': "Partial success",
@@ -59,56 +56,96 @@ MM7_STATUS = {
 }
 TOP_PART_BOUNDARY = "========Top-Part-Boundary"
 
+THIS_GW = None
 
 def send_mms(txid):
     tx = models.transaction.MMSTransaction(txid)
     if tx is None:
-        log.warning("[{}] Transaction not found when attempting to send".format(txid))
+        log.warning("[{}] transaction {} not found when attempting to send"
+            .format(gw.gwid, txid)
+        )
         return
-    gw = MMSGateway(tx.gateway_id)
+    gw = THIS_GW
+    log.debug("[{}] processing transaction {}".format(gw.gwid, txid))
 
     # is this gateway healthy enough to execute the job?
     this_job = rq.get_current_job()
-    heartbeats_left = rdbq.get('gwstat-' + self.gwid) 
+    heartbeats_left = rdbq.get('gwstat-' + gw.gwid) 
     if heartbeats_left is None:
         # this shouldnt happen: if the heartbeat key is gone, the gateway instance is dead
         # (if it does happen, then it's just my bad logic)
-        log.alarm("[{}] Gateway still alive, despite missing {} heartbeats"
+        log.alarm("[{}] gateway still alive, despite missing {} heartbeats"
             .format(gw.gwid, GW_HEARTBEATS - heartbeats_left)
         )
-        reschedule(this_job)
+        reschedule(this_job, gw.q_tx)
     elif heartbeats_left < (GW_HEARTBEATS - 1):
         # is this gateway is probably not healthy enough to process the job, have it skip it
-        log.warning("[{}] Gateway in bad state when attempted transmission {}, rescheduling"
+        log.warning("[{}] gateway in bad state when attempted transmission {}, rescheduling"
             .format(gw.gwid, txid)
         )
-        reschedule(this_job)
+        reschedule(this_job, gw.q_tx)
     else:
         try:
             m = gw.render(tx)
-            log.debug("[{}] Gateway {} prepared for transmission".format(txid, gwid))
+            log.debug("[{}] {} prepared for transmission".format(gw.gwid, txid))
             ret = gw.send_to_mmsc(m, tx)
-            log.info("[{}] Gateway {} sent to reciptients: {}".format(txid, gw.gwid, ret))
+            log.info("[{}] {} sent to reciptients: {}".format(gw.gwid, txid, ret))
             # if any recipients not in this list, we should point out to them
             #! adjust transmission status
-        except SMTPRecipientsRefused as refused:
-            log.info("[{}] Gateway {} refused all reciptients: {}".format(txid, gwid, refused))
-        except SMTPSenderRefused as refused:
-            log.info("[{}] Gateway {} refused sender {}".format(txid, gwid, tx.message.origin))
+        except smtplib.SMTPRecipientsRefused as refused:
+            log.info("[{}] {} all reciptients were refused: {}".format(gw.gwid, txid, refused))
+        except smtplib.SMTPSenderRefused as refused:
+            log.info("[{}] {} refused sender {}".format(gw.gwid, txid, tx.message.origin))
         except Exception as ex:
-            log.info("[{}] Gateway {} error: {}".format(txid, gwid, ex))
-            reschedule(this_job)
+            print(traceback.format_exc())
+            log.info("[{}] {} gateway error: {}".format(gw.gwid, txid, ex))
+            reschedule(this_job, gw.q_tx)
 
 
-def reschedule(job):
-    this_job.meta['retries'] = this_job.meta['retries'] - 1
-    if this_job.meta['retries'] < 0:
-        log.warning("[{}] Rescheduling of transmission {} aborted, too many retries"
-            .format(gw.gwid, txid)
+def process_event(txid, meta):
+    gw = THIS_GW
+    
+
+
+def process_mo(txid, meta, content):
+    gw = THIS_GW
+    msg, status = gw.create_message(meta)
+    if msg:
+        if not content.is_multipart():
+            m = content.get_payload(decode=True)
+            log.info("Media: {} size {}".format(
+                content.get_content_type(),
+                content.get("Content-Length", "unknown")
+            ))
+            if bad_media:
+                status = '2004'
+        else:
+            one_bad = False; all_bad = False
+            media_parts = content.get_payload()
+            for mp in media_parts:
+                bad_media = False
+                m = mp.get_payload(decode=True)
+                log.info("Media: {} size {}".format(
+                    mp.get_content_type(),
+                    mp.get("Content-Length", "unknown")
+                ))
+                one_bad = one_bad or bad_media
+                all_bad = all_bad and bad_media
+            if one_bad: status = '1100'
+            if all_bad: status = '2004'
+
+        
+
+
+def reschedule(job, queue):
+    job.meta['retries'] = job.meta['retries'] - 1
+    if job.meta['retries'] < 0:
+        log.warning("[{}] {} transaction aborted, too many retries"
+            .format(THIS_GW.gwid, job.get_id())
         )
     else:
-        this_job.save_meta()
-        gw.q_tx.enqueue(this_job)
+        job.save_meta()
+        queue.enqueue_job(job)
 
 
 class MMSGateway(object):
@@ -284,6 +321,8 @@ class MM4Gateway(MMSGateway):
 
 
     def render(self, tx):
+
+        log.debug("[{}] building MM4 message".format(tx.tx_id))
         e = MIMEMultipart("related", boundary=TOP_PART_BOUNDARY)
 
         e['From'] = self.origin_prefix + tx.message.origin + self.origin_suffix
@@ -291,25 +330,31 @@ class MM4Gateway(MMSGateway):
         e['Subject'] = tx.message.subject
         e['To'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.destination))
         e['Cc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.cc))
-        e['Bcc'] = ",".join(lap(lambda a: self.dest_prefix + a + self.dest_suffix, tx.bcc))
+        e['Bcc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.bcc))
         
-        for p in tx.message.message.parts:
-            content = None
+        for pid in tx.message.parts:
+            p = models.message.MMSMessagePart(pid)
             if p.content:
+                # actual content is provided in the part object itself
                 content = p.content
-            elif p.content_url.startswith("@"):
-                content = p.content_url
+            elif (
+                p.content_url.startswith("file://") or
+                p.content_url.startswith("http://") or 
+                p.content_url.startswith("https://")
+            ):
+                # download the media file, unless already exists
+                if not os.path.exists(content):
+                    content = download_to_file(p.content_url, repo( 
+                        TMP_MEDIA_DIR, tx.message.message_id + "-" + p.content_id
+                    ))
             else:
-                fn = download_to_file(p.content_url, 
-                    TEMPORARY_FILES_DIR + tx.message.message_id + "-" + p.content_id
-                ) 
-                if fn:
-                    content = "@" + fn
-                    # we also may wanna save this with the message object, so we
-                    # don't need to download the file again if the transmission 
-                    # fails; but is it wise to do so, since the file is ephemeral?
-            if content is None:
+                log.warning("[{}] {} failed to obtain content for part '{}' in message {}"
+                    .format(self.gwid, tx.tx_id, p.content_id, tx.message.message_id)
+                )
                 continue
+            log.debug("[{}] {} message {} part {} saved as '{}'"
+                .format(self.gwid, tx.tx_id, tx.message.message_id, p.content_id, content)
+            )
             mp = None
             try:
                 if p.content_type == "application/smil":
@@ -319,15 +364,17 @@ class MM4Gateway(MMSGateway):
                 elif p.content_type == "text/plain":
                     mp = MIMEText(content)
                 elif p.content_type.startswith("image/"):
-                    fh.open(content[1:])
+                    fh = open(content)
                     mp = MIMEImage(fh.read())
                     fh.close()
                 elif p.content_type.startswith("audio/"):
-                    fh.open(content[1:])
+                    fh = open(content)
                     mp = MIMEAudio(fh.read())
                     fh.close()
             except Exception as e:
-                log.debug("")
+                log.debug("[{}] {} failed to create MIME part '{}' component for message {}: {}"
+                    .format(self.gwid, tx.tx_id, p.content_id, tx.message.message_id, e)
+                )
                 mp = None
             if mp:
                 mp.add_header("Content-Id", p.content_id)
@@ -335,13 +382,13 @@ class MM4Gateway(MMSGateway):
 
         e.add_header("X-Mms-3GPP-MMS-Version", self.protocol_version)
         e.add_header("X-Mms-Message-Type", "MM4_forward.REQ")
-        e.add_header("X-Mms-Transaction-ID", tx.txid)
+        e.add_header("X-Mms-Transaction-ID", tx.tx_id)
         if tx.message.expire_after:
             e.add_header("X-Mms-Expiry", tx.message.expire_after)
         if tx.message.message_class:
             e.add_header("X-Mms-Message-Class", tx.message.message_class)
-        if tx.message.priority:
-            e.add_header("X-Mms-Priority", tx.message.priority)
+        if tx.priority:
+            e.add_header("X-Mms-Priority", tx.priority)
         if self.request_ack:
             e.add_header("X-Mms-Ack-Request", "1")
         if self.request_dlr:
@@ -378,25 +425,23 @@ class MM4Gateway(MMSGateway):
         if self.return_route:
             e.add_header("X-Mms-Return-Route", self.return_route)
 
-        return e.as_string()
+#        return e.as_string()
+        log.debug(e.as_string())
+        return e
 
 
     def send_to_mmsc(self, payload, transmission):
-        return self.connection.sendmail(payload, 
-            from_addr=self.origin_prefix + transmission.message.origin + self.origin_suffix
-        )
+#        return self.connection.sendmail(
+#            self.origin_prefix + transmission.message.origin + self.origin_suffix,
+#            (
+#                list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.destination)) +
+#                list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.cc)) +
+#                list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.bcc))
+#            ),
+#            payload
+#        )
+        return self.connection.send_message(payload)
 
-
-def add_mm7_address(tag, addr, prefix, suffix):
-    if len(addr):
-        return
-    elif "@" in addr:
-        ET.SubElement(tag, "RFC2822Address").text = addr
-    elif addr.isdigit() and len(addr) < 7:
-        ET.SubElement(tag, "ShortCode").text = prefix + addr + suffix
-    elif tx.message.origin.isdigit():
-        ET.SubElement(tag, "number").text = prefix + addr + suffix
-            
 
 class MM7Gateway(MMSGateway):
 
@@ -424,6 +469,17 @@ class MM7Gateway(MMSGateway):
         self.peer_timeout = cfg['outbound'].get('timeout', 10),
 
 
+    def _add_address(tag, addr, prefix, suffix):
+        if len(addr):
+            return
+        elif "@" in addr:
+            ET.SubElement(tag, "RFC2822Address").text = addr
+        elif addr.isdigit() and len(addr) < 7:
+            ET.SubElement(tag, "ShortCode").text = prefix + addr + suffix
+        elif tx.message.origin.isdigit():
+            ET.SubElement(tag, "number").text = prefix + addr + suffix
+            
+
     def heartbeat(self):
         pass
 
@@ -445,7 +501,7 @@ class MM7Gateway(MMSGateway):
         sender = ET.SubElement(submit_rq, "SenderIdentification")
         ET.SubElement(sender, "VASPID").text = self.vaspid
         ET.SubElement(sender, "VASID").text = self.vasid
-        add_mm7_address(ET.SubElement(sender, "SenderAddress"), tx.message.origin, 
+        self._add_address(ET.SubElement(sender, "SenderAddress"), tx.message.origin, 
             self.origin_prefix, self.origin_suffix
         )
 
@@ -453,15 +509,15 @@ class MM7Gateway(MMSGateway):
         if len(tx.destination):
             to = ET.SubElement(recipients, "To")
             for a in tx.destination:
-                add_mm7_address(to, a, self.dest_prefix, self.dest_suffix)
+                self._add_address(to, a, self.dest_prefix, self.dest_suffix)
         if len(tx.cc):
             cc = ET.SubElement(recipients, "Cc")
             for a in tx.cc:
-                add_mm7_address(cc, a, self.dest_prefix, self.dest_suffix)
+                self._add_address(cc, a, self.dest_prefix, self.dest_suffix)
         if len(tx.bcc):
             bcc = ET.SubElement(recipients, "Bcc")
             for a in tx.bcc:
-                add_mm7_address(bcc, a, self.dest_prefix, self.dest_suffix)
+                self._add_address(bcc, a, self.dest_prefix, self.dest_suffix)
 
         if self.service_code:
             ET.SubElement(submit_rq, "ServiceCode").text = self.service_code
@@ -578,7 +634,7 @@ class MM7Gateway(MMSGateway):
                 content += l + "\r\n"
         log.debug("sending request headers: {} -- content {} ...".format(headers, content[:4096]))
         if len(content) > 4096:
-            log.debug("... {}".format(content[-200:]))
+            log.debug("... {}".format(content[-256:]))
         rp = requests.post(self.remote_peer[0],
             auth=self.auth,
             headers=headers,
@@ -589,6 +645,51 @@ class MM7Gateway(MMSGateway):
         return "response status {}: {}\n".format(rp.status_code, rp.text)
 
 
+    @classmethod
+    def build_response(cls, message_type, transaction, msgid, status):
+        env = ET.Element("soapenv:Envelope", { 'xmlns:soapenv': MM7_NAMESPACE['env'] })
+        env_header = ET.SubElement(env, "soapenv:Header")
+        ET.SubElement(env_header, "mm7:TransactionID", {
+            'xmlns:mm7': MM7_NAMESPACE['mm7'],
+            'soapenv:mustUnderstand': "1",
+        }).text = transaction
+        env_body = ET.SubElement(env, "soapenv:Body")
+        rp = ET.SubElement(env_body, message_type, { 'xmlns': MM7_NAMESPACE['mm7'] })
+        ET.SubElement(rp, "MM7Version").text = VERSION['mm7']
+        stat = ET.SubElement(rp, "Status")
+        ET.SubElement(stat, "StatusCode").text= status
+        ET.SubElement(stat, "StatusText").text = MM7_STATUS[status]
+        if msgid:
+            ET.SubElement(rp, "MessageID").text = msgid
+        soap = '<?xml version="1.0" ?>' + ET.tostring(env)
+        log.info("Prepared response: {}".format(soap))
+        return soap
 
+
+    def create_message(self, x):
+        pass
+
+
+    def process_dlr_metadata(meta):
+        log.debug("DLR metadata elements: {}".format(list(meta)))
+        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
+        mt_status = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MMStatus", "").strip()
+        # process Sender and Recipients/To|Cc|Bcc tags, with Number|ShortCode|RFC2822Address subtags
+        return msgid, None
+
+
+    def process_rr_metadata(meta):
+        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
+        return msgid, None
+
+
+    def process_cancel_metadata(meta):
+        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
+        return msgid, None
+
+
+    def process_replace_metadata(meta):
+        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
+        return msgid, None
 
 

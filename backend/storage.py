@@ -5,7 +5,7 @@ from constants import *
 from backend.logger import log
 
 rdb = redis.StrictRedis(
-    host=STORAGE_CONN.get('host'),
+    host=STORAGE_CONN.get('host', "localhost"),
     port=STORAGE_CONN.get('port', 6379),
     db=STORAGE_CONN.get('db', 0)
 )
@@ -22,7 +22,7 @@ except Exception as err:
     rdb = None
 
 rdbq = redis.StrictRedis(
-    host=QUEUE_CONN.get('host'),
+    host=QUEUE_CONN.get('host', "localhost"),
     port=QUEUE_CONN.get('port', 6379),
     db=QUEUE_CONN.get('db', 0)
 )

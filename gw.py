@@ -10,7 +10,6 @@ from backend.logger import log
 from backend.storage import rdbq
 import models.gateway
 
-
 def heartbeat(gateway):
     if gateway.heartbeat():
         threading.Timer(GW_HEARTBEAT_TIMER, heartbeat, [ gateway ]).start()
@@ -45,6 +44,8 @@ elif gw_type == "MM7":
 else:
     print sys.argv[len(sys.argv) - 1] + "Gateway protocol unsupported or missing; use MM4 or MM7.\n"
     exit()
+
+models.gateway.THIS_GW = gw
 
 burst = "-b" in sys.argv or "--burst" in sys.argv
 if not burst:
