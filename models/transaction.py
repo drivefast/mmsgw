@@ -26,6 +26,7 @@ def enqueue_mms_transaction(msgid):
     tx.linked_id = tj.get('linked_id', "")
     pri = tj.get('priority', "").lower()
     tx.priority = pri if pri in ACCEPTED_MESSAGE_PRIORITIES else "normal"
+    tx.report_url = tj.get('report_url', "")
 
     tx.save()
     tx.nq(tj.get('gateway'))
@@ -116,15 +117,19 @@ class MMSTransaction(object):
     bcc = set()
     linked_id = ""
     priority = ""
+    carrier_ref = ""
+    report_url = ""
     created_ts = 0
+    processed_ts = 0
+    rendered_ts = 0
     sent_ts = 0
-    forwarded_ts = 0
-    forwarded_status = ""
-    delivered_ts = 0
-    delivered_status = ""
-    read_reply_ts = 0
-    read_reply_status = ""
-    send_error = ""
+#    forwarded_ts = 0
+#    forwarded_status = ""
+#    delivered_ts = 0
+#    delivered_status = ""
+#    read_reply_ts = 0
+#    read_reply_status = ""
+    final_status = ""
 
     def __init__(self, txid=None, msgid=None):
         if txid is None:
@@ -147,15 +152,19 @@ class MMSTransaction(object):
             'bcc': ",".join(self.bcc),
             'linked_id': self.linked_id,
             'priority': self.priority,
+            'carrier_ref': self.carrier_ref,
+            'report_url': self.report_url,
             'created_ts': self.created_ts,
+            'processed_ts': self.processed_ts,
+            'rendered_ts': self.rendered_ts,
             'sent_ts': self.sent_ts,
-            'forwarded_ts': self.forwarded_ts,
-            'forwarded_status': self.forwarded_status,
-            'delivered_ts': self.delivered_ts,
-            'delivered_status': self.delivered_status,
-            'read_reply_ts': self.read_reply_ts,
-            'read_reply_status': self.read_reply_status,
-            'send_error': self.send_error,
+#            'forwarded_ts': self.forwarded_ts,
+#            'forwarded_status': self.forwarded_status,
+#            'delivered_ts': self.delivered_ts,
+#            'delivered_status': self.delivered_status,
+#            'read_reply_ts': self.read_reply_ts,
+#            'read_reply_status': self.read_reply_status,
+            'final_status': self.final_status,
         })
 
 
@@ -166,20 +175,27 @@ class MMSTransaction(object):
             self.message = models.message.MMSMessage(tx['message_id'])
             self.gateway_id = tx['gateway_id']
             self.gateway = tx['gateway']
-            self.destination = set(tx.get('destination', "").split(","))
-            self.cc = set(tx.get('cc', "").split(","))
-            self.bcc = set(tx.get('bcc', "").split(","))
+            l = tx.get('destination', "")
+            self.destination = set(l.split(",")) if len(l) > 0 else set()
+            l = tx.get('cc', "")
+            self.cc = set(l.split(",")) if len(l) > 0 else set()
+            l = tx.get('bcc', "")
+            self.bcc = set(l.split(",")) if len(l) > 0 else set()
             self.linked_id = tx['linked_id']
-            self.created_ts = tx['created_ts']
-            self.sent_ts = tx['sent_ts']
             self.priority = tx['priority']
-            self.forwarded_ts = tx['forwarded_ts']
-            self.forwarded_status = tx['forwarded_status']
-            self.delivered_ts = tx['delivered_ts']
-            self.delivered_status = tx['delivered_status']
-            self.read_reply_ts = tx['read_reply_ts']
-            self.read_reply_status = tx['read_reply_status']
-            self.send_error = tx['send_error']
+            self.carrier_ref = tx['carreir_ref']
+            self.report_url = tx['report_url']
+            self.created_ts = tx['created_ts']
+            self.processed_ts = tx['processed_ts']
+            self.rendered_ts = tx['rendered_ts']
+            self.sent_ts = tx['sent_ts']
+#            self.forwarded_ts = tx['forwarded_ts']
+#            self.forwarded_status = tx['forwarded_status']
+#            self.delivered_ts = tx['delivered_ts']
+#            self.delivered_status = tx['delivered_status']
+#            self.read_reply_ts = tx['read_reply_ts']
+#            self.read_reply_status = tx['read_reply_status']
+            self.final_status = tx['final_status']
 
 
     def to_dict(self):
@@ -193,18 +209,22 @@ class MMSTransaction(object):
             'bcc': list(self.bcc),
             'linked_id': self.linked_id,
             'priority': self.priority,
+            'carrier_ref': self.carrier_ref,
+            'report_url': self.report_url,
             'created_ts': self.created_ts,
+            'processed_ts': self.processed_ts,
+            'rendered_ts': self.rendered_ts,
             'sent_ts': self.sent_ts,
-            'forwarded_ts': self.forwarded_ts,
-            'forwarded_status': self.forwarded_status,
-            'delivered_ts': self.delivered_ts,
-            'delivered_status': self.delivered_status,
-            'read_reply_ts': self.read_reply_ts,
-            'read_reply_status': self.read_reply_status,
-            'send_error': self.send_error,
+#            'forwarded_ts': self.forwarded_ts,
+#            'forwarded_status': self.forwarded_status,
+#            'delivered_ts': self.delivered_ts,
+#            'delivered_status': self.delivered_status,
+#            'read_reply_ts': self.read_reply_ts,
+#            'read_reply_status': self.read_reply_status,
+            'final_status': self.final_status,
         }
 
-        
+
     def nq(self, gateway):
         self.gateway = gateway
         q_tx = rq.Queue("QTX-" + (gateway or DEFAULT_GATEWAY), connection=rdbq)

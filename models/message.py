@@ -24,8 +24,6 @@ def create_mms_message():
     mj = bottle.request.json
     m = MMSMessage()
 
-    m.report_events_address = mj.get('report_events_address', "")
-
     m.origin = mj.get('origin', "")
     if type(mj.get('show_sender')) == bool:
         m.show_sender = 1 if mj['show_sender'] else -1
@@ -84,8 +82,6 @@ def update_mms_message(msgid):
     m = MMSMessage(msgid)
     if m:
         mj = bottle.request.json
-        if mj.get('report_events_address'):
-            m.report_events_address = mj['report_events_address']
         if mj.get('origin'):
             m.origin = mj['origin']
         if type(mj.get('show_sender')) == bool:
@@ -172,7 +168,6 @@ def create_mms_message():
 class MMSMessage(object):
 
     message_id = None
-    report_events_address = ""
     ascii_rendering = None
     origin = ""
     show_sender = 0
@@ -200,7 +195,6 @@ class MMSMessage(object):
     def save(self):
     # save to storage
         rdb.hmset('mmsmsg-' + self.message_id, {
-            'report_events_address': self.report_events_address,
             'origin': self.origin,
             'show_sender': self.show_sender,
             'subject': self.subject,
@@ -221,7 +215,6 @@ class MMSMessage(object):
         msg = rdb.hgetall('mmsmsg-' + msgid)
         if msg:
             self.message_id = msgid
-            self.report_events_address = msg.get('report_events_address', "")
             self.origin = msg.get('origin', "")
             self.show_sender = msg.get('show_sender', 0)
             self.subject = msg.get('subject', "")
@@ -247,7 +240,6 @@ class MMSMessage(object):
         ret = {
             'message_id': self.message_id,
             'content_class': self.content_class,
-            'report_events_address': self.report_events_address,
             'origin': self.origin,
             'subject': self.subject,
             'parts': []

@@ -71,6 +71,15 @@ def download_to_file(url, save_as=None):
         return None
 
 
+def find_in_dict(d, k):
+    if k in d: return d[k]
+    for kk, v in d.items():
+        if isinstance(v, dict):
+            i = find_in_dict(v, k)
+            if i is not None:
+                return i
+
+
 def repo(path, fn):
     try:
         if not os.path.isdir(path + fn[:2]):

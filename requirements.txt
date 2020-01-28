@@ -4,5 +4,6 @@ requests
 redis
 hiredis
 rq
+xmltodict
 iso8601
 

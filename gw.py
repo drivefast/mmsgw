@@ -34,15 +34,14 @@ gw_type = cfg['gateway'].get('protocol').upper()
 log.warning("[{}] Starting {} gateway".format(gwid, gw_type))
 if gw_type == "MM4":
     gw = models.gateway.MM4Gateway(gwid)
-    gw.config(cfg)
-    if not gw.start():
-        print ("SMTP connection error, check logs. This gateway instance will not start.\n")
-        exit()
 elif gw_type == "MM7":
     gw = models.gateway.MM7Gateway(gwid)
-    gw.config(cfg)
 else:
     print sys.argv[len(sys.argv) - 1] + "Gateway protocol unsupported or missing; use MM4 or MM7.\n"
+    exit()
+gw.config(cfg)
+if not gw.start():
+    print ("SMTP connection error, check logs. This gateway instance will not start.\n")
     exit()
 
 models.gateway.THIS_GW = gw

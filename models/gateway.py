@@ -1,10 +1,12 @@
+import os.path
+import shutil
 import time
 import datetime
 import uuid
 import base64
 import rq
-import os.path
-import shutil
+import requests
+import xmltodict
 
 import traceback
 
@@ -20,8 +22,8 @@ from email.mime.audio import MIMEAudio
 
 from constants import *
 from backend.logger import log
-from backend.util import download_to_file, repo
-from backend.storage import rdbq
+from backend.util import find_in_dict, download_to_file, repo
+from backend.storage import rdb, rdbq
 import models.transaction
 import models.message
 
@@ -67,6 +69,9 @@ def send_mms(txid):
         return
     gw = THIS_GW
     log.debug("[{}] processing transaction {}".format(gw.gwid, txid))
+    tx.gateway_id = gw.gwid
+    tx.processed_ts = int(time.time())
+    tx.save()
 
     # is this gateway healthy enough to execute the job?
     this_job = rq.get_current_job()
@@ -85,27 +90,46 @@ def send_mms(txid):
         )
         reschedule(this_job, gw.q_tx)
     else:
+        tx.gateway_id += gw.gwid + " "
+        tx.processed_ts = int(time.time())
+        tx.save()
+
         try:
+            log.debug("[{}] {} creating {} transmission image".format(gw.gwid, txid, gw.protocol))
             m = gw.render(tx)
-            log.debug("[{}] {} prepared for transmission".format(gw.gwid, txid))
-            ret = gw.send_to_mmsc(m, tx)
-            log.info("[{}] {} sent to reciptients: {}".format(gw.gwid, txid, ret))
-            # if any recipients not in this list, we should point out to them
-            #! adjust transmission status
-        except smtplib.SMTPRecipientsRefused as refused:
-            log.info("[{}] {} all reciptients were refused: {}".format(gw.gwid, txid, refused))
-        except smtplib.SMTPSenderRefused as refused:
-            log.info("[{}] {} refused sender {}".format(gw.gwid, txid, tx.message.origin))
+            tx.rendered_ts = int(time.time())
+            tx.save()
+            if m:
+                log.debug("[{}] {} prepared for transmission".format(gw.gwid, txid))
+                ret_code, ret_desc = gw.send_to_mmsc(m, tx)
+                if ret_code is None:
+                    tx.carrier_ref = ret_desc
+                    tx.sent_ts = int(time.time())
+                    tx.save()
+            else:
+                ret_code, ret_desc = "1", "internal error: failed to properly render message" 
         except Exception as ex:
-            print(traceback.format_exc())
-            log.info("[{}] {} gateway error: {}".format(gw.gwid, txid, ex))
-            reschedule(this_job, gw.q_tx)
+            log.info("[{}] {} gateway error: {}".format(gw.gwid, txid, traceback.format_exc()))
+            ret_code, ret_desc = "2", "internal error: {}".format(ex) 
+
+        # callback to the app if necessary
+        q_cb = rq.Queue("QCB", connection=rdbq)
+        url_list = tx.report_url.split(",") + gw.report_url.split(",")
+        for url in url_list:
+            q_cb.enqueue_call(func='models.transmission.send_event', args=( url, txid, ))
+
+        if ret_code is not None:
+            log.debug("[{}] {} transmission error {}: {}".format(gw.gwid, txid, ret_code, ret_desc))
+            tx.final_status = "{} {}".format(ret_code.zfill(4), ret_desc)
+            tx.save()
+            if len(ret_code) > 1:
+                # only reschedule for external, environmeentl errors
+                reschedule(this_job, gw.q_tx)
 
 
 def process_event(txid, meta):
     gw = THIS_GW
     
-
 
 def process_mo(txid, meta, content):
     gw = THIS_GW
@@ -134,8 +158,6 @@ def process_mo(txid, meta, content):
             if one_bad: status = '1100'
             if all_bad: status = '2004'
 
-        
-
 
 def reschedule(job, queue):
     job.meta['retries'] = job.meta['retries'] - 1
@@ -163,6 +185,7 @@ class MMSGateway(object):
     carrier = ""
     active = True
     tps_limit = 0
+    report_url = ""
 
     # outbound
     secure = False
@@ -206,9 +229,10 @@ class MMSGateway(object):
     def config(self, cfg):
         self.group = cfg['gateway'].get('group')
         self.name = cfg['gateway'].get('name')
-        self.potocol_version = cfg['gateway'].get('version')
+        self.protocol_version = cfg['gateway'].get('version')
         self.carrier = cfg['gateway'].get('carrier', "")
         self.tps_limit = int(cfg['gateway'].get('tps_limit', 0))
+        self.report_url = cfg['gateway'].get('report_url', "")
 
         self.secure = cfg['outbound'].get('secure_connection', "").lower() in ("yes", "true", "t", "1")
         self.remote_peer = [ cfg['outbound'].get('remote_host', "localhost"), 0 ]
@@ -322,15 +346,17 @@ class MM4Gateway(MMSGateway):
 
     def render(self, tx):
 
-        log.debug("[{}] building MM4 message".format(tx.tx_id))
         e = MIMEMultipart("related", boundary=TOP_PART_BOUNDARY)
 
         e['From'] = self.origin_prefix + tx.message.origin + self.origin_suffix
         e['Sender'] = self.origin_prefix + tx.message.origin + self.origin_suffix
         e['Subject'] = tx.message.subject
-        e['To'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.destination))
-        e['Cc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.cc))
-        e['Bcc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.bcc))
+        if len(tx.destination):
+            e['To'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.destination))
+        if len(tx.cc):
+            e['Cc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.cc))
+        if len(tx.bcc):
+            e['Bcc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.bcc))
         
         for pid in tx.message.parts:
             p = models.message.MMSMessagePart(pid)
@@ -372,7 +398,7 @@ class MM4Gateway(MMSGateway):
                     mp = MIMEAudio(fh.read())
                     fh.close()
             except Exception as e:
-                log.debug("[{}] {} failed to create MIME part '{}' component for message {}: {}"
+                log.warning("[{}] {} failed to create MIME part '{}' component for message {}: {}"
                     .format(self.gwid, tx.tx_id, p.content_id, tx.message.message_id, e)
                 )
                 mp = None
@@ -425,22 +451,40 @@ class MM4Gateway(MMSGateway):
         if self.return_route:
             e.add_header("X-Mms-Return-Route", self.return_route)
 
-#        return e.as_string()
-        log.debug(e.as_string())
         return e
 
 
     def send_to_mmsc(self, payload, transmission):
-#        return self.connection.sendmail(
-#            self.origin_prefix + transmission.message.origin + self.origin_suffix,
-#            (
-#                list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.destination)) +
-#                list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.cc)) +
-#                list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.bcc))
-#            ),
-#            payload
-#        )
-        return self.connection.send_message(payload)
+        pl = payload.as_string()
+        log.info("[{}] sending {} as MM4: {}{}"
+            .format(self.gwid, transmission.tx_id, pl[:4096], ("..." if len(pl) > 4096 else ""))
+        )
+        if len(pl) > 4096:
+            log.info("[{}] ...{}".format(self.gwid, pl[-256:]))
+        smtp_err = ""
+        try:
+            if sys.version_info.major < 3:
+                self.connection.sendmail(
+                    self.origin_prefix + transmission.message.origin + self.origin_suffix,
+                    (
+                       list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.destination)) +
+                        list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.cc)) +
+                        list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.bcc))
+                    ),
+                    pl
+                )
+            else:
+                self.connection.send_message(payload)
+            return None, ""
+        except smtplib.SMTPRecipientsRefused as refused:
+            log.info("[{}] {} all recipients were refused: {}".format(gw.gwid, transmission.tx_id, refused))
+            return "42", "SMTP error (all recipients were refused)"
+        except smtplib.SMTPSenderRefused:
+            log.info("[{}] {} refused sender {}".format(gw.gwid, transmission.tx_id, transmission.message.origin))
+            return "41", "SMTP error (sender address refused)"
+        except smtplib.SMTPException as smtpe:
+            log.info("[{}] {} refused sender {}".format(gw.gwid, transmission.tx_id, smtpe))
+            return "40", "SMTP error (see gateway logs)"
 
 
 class MM7Gateway(MMSGateway):
@@ -466,23 +510,51 @@ class MM7Gateway(MMSGateway):
         self.vaspid = cfg['gateway'].get('vaspid')
         self.vasid = cfg['gateway'].get('vasid')
         self.service_code = cfg['gateway'].get('service_code')
-        self.peer_timeout = cfg['outbound'].get('timeout', 10),
+        self.peer_timeout = cfg['outbound'].get('timeout', 10.)
 
 
-    def _add_address(tag, addr, prefix, suffix):
-        if len(addr):
+    def start(self):
+        # start outbound gateway
+        rdbq.set('gwstat-' + self.gwid, 1, 3 + GW_HEARTBEAT_TIMER)
+        self.connection = self.remote_peer[0]
+#        # register the gateway to receive inbound messages
+#        rdbq.sadd('mmsrxsource-' + self.this_domain, self.gwid)
+#        rdbq.sadd('mmsrxsource-' + self.this_host, self.gwid)
+        return True
+
+
+    def heartbeat(self):
+        if rdbq.decr('gwstat-' + self.gwid) <= -1:
+            # this gateway beeded to death, we need to stop the app
+            rdbq.delete('gwstat-' + self.gwid)
+            return False
+        try:
+            rp = requests.head(self.connection, auth=self.auth)
+            if rp.ok:
+                rdbq.set('gwstat-' + self.gwid, GW_HEARTBEATS,
+                    ex=(GW_HEARTBEAT_TIMER * (2 + GW_HEARTBEATS))
+                )
+                log.debug("[{}] _/\_".format(self.gwid))
+            else:
+                log.critical("[{}] Remote server didn't responded {} to our HEAD request: {}"
+                    .format(self.gwid, rp.status_code)
+                )
+            return rp.ok
+        except requests.RequestException as re:
+            log.critical("[{}] Gateway heartbeat failed: {}".format(self.gwid, re))
+            return False
+
+
+    def _add_address(self, tag, addr, prefix, suffix):
+        if len(addr) == 0:
             return
         elif "@" in addr:
             ET.SubElement(tag, "RFC2822Address").text = addr
         elif addr.isdigit() and len(addr) < 7:
             ET.SubElement(tag, "ShortCode").text = prefix + addr + suffix
-        elif tx.message.origin.isdigit():
+        elif addr.isdigit():
             ET.SubElement(tag, "number").text = prefix + addr + suffix
             
-
-    def heartbeat(self):
-        pass
-
 
     def render(self, tx):
 
@@ -531,20 +603,20 @@ class MM7Gateway(MMSGateway):
 #            rc.set("replyDeadline", self.reply_deadline or,
 #                (datetime.datetime.now() + datetime.timedelta(days=10)).isoformat()
 #            ))
-        if tx.message.earliest_delivery:
+        if tx.message.earliest_delivery > 0:
             ET.SubElement(submit_rq, "EarliestDeliveryTime").text = \
-                datetime.datetime.from_timestamp(tx.message.earliest_delivery).isoformat()
-        if tx.message.expire_after:
+                datetime.datetime.fromtimestamp(float(tx.message.earliest_delivery)).isoformat()
+        if tx.message.expire_after > 0:
             ET.SubElement(submit_rq, "ExpiryDate").text = \
-                 datetime.datetime.from_timestamp(tx.message.expire_after).isoformat()
-        ET.SubElement(submit_rq, "DeliveryReport").text = self.request_dlr
-        ET.SubElement(submit_rq, "ReadReply").text = self.request_rrr
+                datetime.datetime.fromtimestamp(float(tx.message.expire_after)).isoformat()
+        ET.SubElement(submit_rq, "DeliveryReport").text = "true" if self.request_dlr else "false"
+        ET.SubElement(submit_rq, "ReadReply").text = "true" if self.request_rrr else "false"
         ET.SubElement(submit_rq, "Priority").text = tx.priority
         if tx.message.subject:
             ET.SubElement(submit_rq, "Subject").text = tx.message.subject
         if tx.message.charged_party:
             ET.SubElement(submit_rq, "ChargedPartyID").text = tx.message.charged_party
-        if tx.message.distribution_indicator:
+        if tx.message.can_redistribute:
             ET.SubElement(submit_rq, "DistributionIndicator").text = \
                 "true" if tx.message.can_redistribute == 1 else "false"
         if tx.message.content_class:
@@ -570,23 +642,29 @@ class MM7Gateway(MMSGateway):
         content_part.add_header("Content-ID", tx.tx_id + ".content")
         first_part_id = ""
 
-        for p in tx.message.message.parts:
-            content = None
+        for pid in tx.message.parts:
+            p = models.message.MMSMessagePart(pid)
             if p.content:
+                # actual content is provided in the part object itself
                 content = p.content
-            elif p.content_url.startswith("@"):
-                content = p.content_url
+            elif (
+                p.content_url.startswith("file://") or
+                p.content_url.startswith("http://") or
+                p.content_url.startswith("https://")
+            ):
+                # download the media file, unless already exists
+                if not os.path.exists(content):
+                    content = download_to_file(p.content_url, repo(
+                        TMP_MEDIA_DIR, tx.message.message_id + "-" + p.content_id
+                    ))
             else:
-                fn = download_to_file(p.content_url,
-                    TEMPORARY_FILES_DIR + tx.message.message_id + "-" + p.content_id
+                log.warning("[{}] {} failed to obtain content for part '{}' in message {}"
+                    .format(self.gwid, tx.tx_id, p.content_id, tx.message.message_id)
                 )
-                if fn:
-                    content = "@" + fn
-                    # we also may wanna save this with the message object, so we
-                    # don't need to download the file again if the transmission 
-                    # fails; but is it wise to do so, since the file is ephemeral?
-            if content is None:
                 continue
+            log.debug("[{}] {} message {} part {} saved as '{}'"
+                .format(self.gwid, tx.tx_id, tx.message.message_id, p.content_id, content)
+            )
             mp = None
             try:
                 if p.content_type == "application/smil":
@@ -595,15 +673,17 @@ class MM7Gateway(MMSGateway):
                 elif p.content_type == "text/plain":
                     mp = MIMEText(content)
                 elif p.content_type.startswith("image/"):
-                    fh.open(content[1:])
+                    fh = open(content)
                     mp = MIMEImage(fh.read())
                     fh.close()
                 elif p.content_type.startswith("audio/"):
-                    fh.open(content[1:])
+                    fh = open(content)
                     mp = MIMEAudio(fh.read())
                     fh.close()
             except Exception as e:
-                log.debug("")
+                log.warning("[{}] {} failed to create MIME part '{}' component for message {}: {}"
+                    .format(self.gwid, tx.tx_id, p.content_id, tx.message.message_id, e)
+                )
                 mp = None
             if mp:
                 mp.add_header("Content-Id", p.content_id)
@@ -632,17 +712,49 @@ class MM7Gateway(MMSGateway):
             content_started = content_started or (l == "--" + TOP_PART_BOUNDARY)
             if content_started and not l.startswith("MIME-Version:"):
                 content += l + "\r\n"
-        log.debug("sending request headers: {} -- content {} ...".format(headers, content[:4096]))
-        if len(content) > 4096:
-            log.debug("... {}".format(content[-256:]))
-        rp = requests.post(self.remote_peer[0],
-            auth=self.auth,
-            headers=headers,
-            data=content,
-            timeout=self.peer_timeout
+        log.debug("[{}] sending {} MM7 with headers: {}"
+            .format(self.gwid, transmission.tx_id, headers)
         )
-        log.info("response status {}: {}".format(rp.status_code, rp.text))
-        return "response status {}: {}\n".format(rp.status_code, rp.text)
+        log.debug("[{}] {} content: {}{}"
+            .format(self.gwid, transmission.tx_id, content[:4096], ("..." if len(content) > 4096 else ""))
+        )
+        if len(content) > 4096:
+            log.debug("[{}] ... {}".format(self.gwid, content[-256:]))
+        try:
+            rp = requests.post(self.remote_peer[0],
+                auth=self.auth,
+                headers=headers,
+                data=content,
+                timeout=self.peer_timeout
+            )
+            log.info("[{}] {} response status {}: {}"
+                .format(self.gwid, transmission.tx_id, rp.status_code, rp.text)
+            )
+            if rp.ok:
+                 # bad habit: MM7 does 200 OK responses, but indicate an error
+                 try:
+                     env = xmltodict.parse(rp.text)
+                 except Exception as e:
+                     log.warning("[{}] {} failed to xml-parse the SOAP envelope in MM7 response: {}"
+                         .format(self.gwid, transmission.tx_id, e)
+                     )
+                     return "51", "failed to xml-parse the SOAP envelope in MM7 response"
+
+                 stat = find_in_dict(env, 'Status')
+                 if stat:
+                     status_code = stat.get('StatusCode', "0")
+                     status_text = stat.get('StatusText', "")
+                     if status_code in [ "1000", "1100" ]:
+                         return None, find_in_dict(env, 'MessageID')
+                     else: 
+                         return status_code, status_text 
+                 else:
+                     return "52", "message type not identified in MM7 response"
+            else:
+                 return rp.status_code, rp.reason
+        except requests.RequestException as rqe:
+            log.info("[{}] {} http error: {}".format(gw.gwid, txid, rqe))
+            return "50", "http error ({})".format(rqe)
 
 
     @classmethod
