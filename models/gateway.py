@@ -283,6 +283,9 @@ class MM4Gateway(MMSGateway):
 
     def connect(self):
         # try connecting to the remote MMSC we will use for sending MTs
+        log.debug("[{}] connecting to {}:{} as {}"
+            .format(self.gwid, self.remote_peer[0], self.remote_peer[1], self.this_host)
+        )
         try:
             if self.secure:
                 self.connection = smtplib.SMTP_SSL(
@@ -316,7 +319,7 @@ class MM4Gateway(MMSGateway):
 
     def heartbeat(self):
         if rdbq.decr('gwstat-' + self.gwid) <= -1:
-            # this gateway beeded to death, we need to stop the app
+            # this gateway bleeded to death, we need to stop the app
             rdbq.delete('gwstat-' + self.gwid)
             return False
         if self.connection is None:

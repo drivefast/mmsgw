@@ -234,5 +234,5 @@ class MMSTransaction(object):
             meta={ 'retries': MAX_TX_RETRIES },
             ttl=30
         )
-        log.debug("[{}] transmission queued on gateway {}".format(self.tx_id, gateway))
+        log.info("[{}] transmission {} queued for processing".format(gateway, self.tx_id))
 

@@ -10,6 +10,7 @@ from backend.logger import log
 from backend.storage import rdbq
 import models.gateway
 
+
 def heartbeat(gateway):
     if gateway.heartbeat():
         threading.Timer(GW_HEARTBEAT_TIMER, heartbeat, [ gateway ]).start()
@@ -22,7 +23,7 @@ def heartbeat(gateway):
 
 gw = None
 if len(sys.argv) < 2:
-    print "To start a gateway, use a configuration filename as a command line argument.\n"
+    print("To start a gateway, use a configuration filename as a command line argument.\n")
     exit()
 cfg = configparser.ConfigParser()
 cfg.read(sys.argv[len(sys.argv) - 1])
@@ -37,11 +38,11 @@ if gw_type == "MM4":
 elif gw_type == "MM7":
     gw = models.gateway.MM7Gateway(gwid)
 else:
-    print sys.argv[len(sys.argv) - 1] + "Gateway protocol unsupported or missing; use MM4 or MM7.\n"
+    print(sys.argv[len(sys.argv) - 1] + "Gateway protocol unsupported or missing; use MM4 or MM7.\n")
     exit()
 gw.config(cfg)
 if not gw.start():
-    print ("SMTP connection error, check logs. This gateway instance will not start.\n")
+    print("SMTP connection error, check logs. This gateway instance will not start.\n")
     exit()
 
 models.gateway.THIS_GW = gw

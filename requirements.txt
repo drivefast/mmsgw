@@ -4,6 +4,7 @@ requests
 redis
 hiredis
 rq
+pyinotify
 xmltodict
 iso8601
 
