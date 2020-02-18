@@ -53,7 +53,7 @@ if not burst:
     heartbeat(gw)
 
 with Connection(connection=rdbq):
-    w = Worker(['QEV-' + gw_group, 'QTX-' + gw_group, 'QRX-' + gw_group], name=gwid)
+    w = Worker(['QTX-' + gw_group, 'QRX-' + gw_group], name=gwid)
     w.work()
 
 

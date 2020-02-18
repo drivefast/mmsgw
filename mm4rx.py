@@ -31,11 +31,6 @@ def dispatch(peer, sender, receivers, content):
         log.warning(">>>> no gateway to process this email")
         return "555 MAIL FROM/RCPT TO parameters not recognized"
 
-    # sniff test to determine if this is an MM4 message
-    if not "x-mms-3gpp-mms-version" in content.lower():
-        log.warning(">>>> message is not MM4 - no MMS version header")
-        return "550 This message was classified as SPAM and may not be delivered"
-
     mm4rx_id = str(uuid.uuid4()).replace("-", "")
     
     # move content as file to be processed
@@ -49,7 +44,7 @@ def dispatch(peer, sender, receivers, content):
     # post a task for the gateway parser
     q_rx = rq.Queue("QRX-" + gw, connection=rdbq)
     q_rx.enqueue_call(
-        func='models.gateway.mm4rx', args=( mm4rx_id, peer, sender, receivers[0] ),
+        func='models.gateway.mm4rx', args=( fn, ),
         job_id=mm4rx_id,
         ttl=30
     )

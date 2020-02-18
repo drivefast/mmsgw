@@ -12,7 +12,7 @@ import traceback
 
 import xml.etree.cElementTree as ET
 import smtplib
-import email
+import email, email.utils
 import mimetypes
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -69,7 +69,7 @@ def send_mms(txid):
         return
     gw = THIS_GW
     log.debug("[{}] processing transaction {}".format(gw.gwid, txid))
-    tx.gateway_id = gw.gwid
+    tx.gateway_id += gw.gwid + " "
     tx.processed_ts = int(time.time())
     tx.save()
 
@@ -90,41 +90,85 @@ def send_mms(txid):
         )
         reschedule(this_job, gw.q_tx)
     else:
-        tx.gateway_id += gw.gwid + " "
-        tx.processed_ts = int(time.time())
-        tx.save()
 
         try:
             log.debug("[{}] {} creating {} transmission image".format(gw.gwid, txid, gw.protocol))
             m = gw.render(tx)
-            tx.rendered_ts = int(time.time())
-            tx.save()
             if m:
                 log.debug("[{}] {} prepared for transmission".format(gw.gwid, txid))
-                ret_code, ret_desc = gw.send_to_mmsc(m, tx)
+                if gw.protocol == "MM4":
+                    src_addr = gw.originator_addr or gw.origin_prefix + tx.message.origin + gw.origin_suffix
+                    if "@" not in src_addr:
+                        src_addr += "@" + gw.local_host
+                    if gw.recipient_addr is not None:
+                        dest_addr = [ gw.recipient_addr ]
+                    else:
+                        dest_addr = list(map(lambda a: 
+                            gw.dest_prefix + a + gw.dest_suffix + 
+                            (("@" + gw.remote_peer) if "@" not in gw.dest_suffix else "")
+                        , tx.destination | tx.cc | tx.bcc))
+                    ret_code, ret_desc = gw.send_to_mmsc(m, txid, src_addr, dest_addr)
+                else:
+                    ret_code, ret_desc = gw.send_to_mmsc(m, txid)
                 if ret_code is None:
-                    tx.carrier_ref = ret_desc
-                    tx.sent_ts = int(time.time())
-                    tx.save()
+                    tx.set_state([], "SENT", "", "", gw.gwid, ret_desc)
+                    return
+                else:
+                    log.debug("[{}] {} transmission error {}: {}".format(gw.gwid, txid, ret_code, ret_desc))
             else:
                 ret_code, ret_desc = "1", "internal error: failed to properly render message" 
         except Exception as ex:
             log.info("[{}] {} gateway error: {}".format(gw.gwid, txid, traceback.format_exc()))
             ret_code, ret_desc = "2", "internal error: {}".format(ex) 
 
-        # callback to the app if necessary
-        q_cb = rq.Queue("QCB", connection=rdbq)
-        url_list = tx.report_url.split(",") + gw.report_url.split(",")
-        for url in url_list:
-            q_cb.enqueue_call(func='models.transmission.send_event', args=( url, txid, ))
+#        # callback to the app if necessary
+#        q_cb = rq.Queue("QCB", connection=rdbq)
+#        url_list = tx.report_url.split(",") + gw.report_url.split(",")
+#        for url in url_list:
+#            q_cb.enqueue_call(func='models.transmission.send_event', args=( url, txid, ))
 
-        if ret_code is not None:
-            log.debug("[{}] {} transmission error {}: {}".format(gw.gwid, txid, ret_code, ret_desc))
-            tx.final_status = "{} {}".format(ret_code.zfill(4), ret_desc)
-            tx.save()
-            if len(ret_code) > 1:
-                # only reschedule for external, environmeentl errors
-                reschedule(this_job, gw.q_tx)
+        tx.set_state([], "FAILED", ret_code.zfill(4), ret_desc, self.gwid, ret_desc)
+        if len(ret_code) > 1:
+            # only reschedule for external, environmental errors
+            reschedule(this_job, gw.q_tx)
+
+
+def mm4rx(fn, mailto, rcptfrom):
+    # handle received MM4 SMTP message
+    gw = THIS_GW
+    jid = rq.get_current_job().id
+    res = None
+    try:
+        with open(fn, "r") as fh:
+            m = email.message_from_file(fh)
+            if m["X-Mms-3GPP-MMS-Version"] is None:
+                log.warning("[{}] {} not an MM4 message".format(gw.gwid, jid))
+                return
+            m_type = m["X-Mms-Message-Type"]
+            log.debug("[{}] {} handling as {} MM4 message".format(gw.gwid, jid, m_type))
+            if m_type is None:
+                log.info("[{}] {} has no MM4 message type".format(gw.gwid, jid))
+            elif m_type.lower() == "mm4_forward.req":
+                res = gw.process_mo(m)
+            elif m_type.lower() == "mm4_forward.res":
+                res = gw.process_mt_ack(m)
+            elif m_type.lower() == "mm4_delivery_report.req":
+                res = gw.process_dlr(m)
+            elif m_type.lower() == "mm4_read_reply_report.req":
+                res = gw.process_rrr(m)
+            else:
+                log.info("[{}] {} unhandled MM4 message type '{}'".format(gw.gwid, jid, m_type))
+    except IOError as ioe:
+        log.info("[{}] MM4 error reading content of {} at {}: {}".format(gw.gwid, jid, fn, ioe))
+    except email.errors.MessageParseError as mpe:
+        log.info("[{}] MM4 content of {} could not be parsed: {}".format(gw.gwid, jid, mpe))
+    except Exception as e:
+        log.info("[{}] internal error handling received MM4 {}: {}"
+            .format(gw.gwid, jid, traceback.format_exc())
+        )
+
+    if res is not None:
+        pass
 
 
 def process_event(txid, meta):
@@ -175,7 +219,6 @@ class MMSGateway(object):
     gwid = None
     q_tx = None
     q_rx = None
-    q_ev = None
 
     # gateway
     name = None
@@ -211,18 +254,12 @@ class MMSGateway(object):
     applic_id = None
     reply_applic_id = None
     aux_applic_info = None
-    originator_system = None              # MM4 only
-    originator_recipient_address = None   # MM4 only
-    mmsip_address = None                  # MM4 only
-    forward_route = None                  # MM4 only
-    return_route = None                   # MM4 only
 
 
     def __init__(self, gwid):
         self.gwid = gwid
         self.group = gwid.split(":")[0]
         self.q_tx = rq.Queue("QTX-" + self.group, connection=rdbq)
-        self.q_ev = rq.Queue("QEV-" + self.group, connection=rdbq)
         self.q_rx = rq.Queue("QRX-" + self.group, connection=rdbq)
 
 
@@ -239,7 +276,7 @@ class MMSGateway(object):
         if len(cfg['outbound'].get('username', "")) > 0 and len(cfg['outbound'].get('password', "")) > 0:
             self.auth = ( cfg['outbound']['username'], cfg['outbound']['password'] )
         self.local_host = cfg['outbound'].get('local_host', "")
-        
+
         self.dest_prefix = cfg['addressing'].get('dest_prefix', "")
         self.dest_suffix = cfg['addressing'].get('dest_suffix', "")
         self.origin_prefix = cfg['addressing'].get('origin_prefix', "")
@@ -258,6 +295,11 @@ class MM4Gateway(MMSGateway):
 
     connection = None
     server = None
+    originator_addr = None
+    recipient_addr = None
+    mmsip_addr = None
+    forward_route = None
+    return_route = None
 
 
     def __init__(self, gwid):
@@ -268,17 +310,17 @@ class MM4Gateway(MMSGateway):
     def config(self, cfg):
         super(MM4Gateway, self).config(cfg)
         self.remote_peer[1] = int(cfg['outbound'].get('remote_port', (465 if self.secure else 25)))
-        self.originator_system = cfg['features'].get('originator_system')
-        self.originator_recipient_address = cfg['features'].get('originator_recipient_address')
-        self.mmsip_address = cfg['features'].get('mmsip_address')
-        self.forward_route = cfg['features'].get('forward_route')
-        self.return_route = cfg['features'].get('return_route')
+        self.originator_addr = cfg['outbound'].get('originator_address')
+        self.recipient_addr = cfg['outbound'].get('recipient_address')
         keyfile = cfg['outbound'].get('keyfile')
         certfile = cfg['outbound'].get('certfile')
         if keyfile is not None and certfile is not None and self.secure:
             self.ssl_certificate = ( keyfile, certfile )
         self.this_domain = cfg['inbound'].get('domain')
         self.this_host = cfg['inbound'].get('host')
+        self.return_route = cfg['features'].get('return_route')
+        self.mmsip_addr = cfg['features'].get('mmsip_address')
+        self.forward_route = cfg['features'].get('forward_route')
 
 
     def connect(self):
@@ -352,7 +394,7 @@ class MM4Gateway(MMSGateway):
         e = MIMEMultipart("related", boundary=TOP_PART_BOUNDARY)
 
         e['From'] = self.origin_prefix + tx.message.origin + self.origin_suffix
-        e['Sender'] = self.origin_prefix + tx.message.origin + self.origin_suffix
+        e['Sender'] = self.originator_address
         e['Subject'] = tx.message.subject
         if len(tx.destination):
             e['To'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.destination))
@@ -411,7 +453,8 @@ class MM4Gateway(MMSGateway):
 
         e.add_header("X-Mms-3GPP-MMS-Version", self.protocol_version)
         e.add_header("X-Mms-Message-Type", "MM4_forward.REQ")
-        e.add_header("X-Mms-Transaction-ID", tx.tx_id)
+        e.add_header("X-Mms-Transaction-ID", tx.last_req_id)
+        e.add_header("X-Mms-Message-ID", tx.tx_id)
         if tx.message.expire_after:
             e.add_header("X-Mms-Expiry", tx.message.expire_after)
         if tx.message.message_class:
@@ -444,11 +487,11 @@ class MM4Gateway(MMSGateway):
         if self.aux_applic_info:
             e.add_header("X-Mms-Aux-Applic-Info", self.aux_applic_info)
         if self.originator_system:
-            e.add_header("X-Mms-Originator-System", self.originator_system)
+            e.add_header("X-Mms-Originator-System", self.originator_addr)
         if self.originator_recipient_address:
-            e.add_header("X-Mms-Originator-Recipient-Address", self.originator_recipient_address)
-        if self.mmsip_address:
-            e.add_header("X-Mms-MMSIP-Address", self.mmsip_address)
+            e.add_header("X-Mms-Originator-Recipient-Address", self.originator_addr)
+        if self.mmsip_addr:
+            e.add_header("X-Mms-MMSIP-Address", self.mmsip_addr)
         if self.forward_route:
             e.add_header("X-Mms-Forward-Route", self.forward_route)
         if self.return_route:
@@ -457,38 +500,103 @@ class MM4Gateway(MMSGateway):
         return e
 
 
-    def send_to_mmsc(self, payload, transmission):
+    def send_to_mmsc(self, payload, txid, rcpt_from, mail_to):
         pl = payload.as_string()
         log.info("[{}] sending {} as MM4: {}{}"
-            .format(self.gwid, transmission.tx_id, pl[:4096], ("..." if len(pl) > 4096 else ""))
+            .format(self.gwid, txid, pl[:4096], ("..." if len(pl) > 4096 else ""))
         )
         if len(pl) > 4096:
             log.info("[{}] ...{}".format(self.gwid, pl[-256:]))
         smtp_err = ""
         try:
-            if sys.version_info.major < 3:
-                self.connection.sendmail(
-                    self.origin_prefix + transmission.message.origin + self.origin_suffix,
-                    (
-                       list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.destination)) +
-                        list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.cc)) +
-                        list(map(lambda a: self.dest_prefix + a + self.dest_suffix, transmission.bcc))
-                    ),
-                    pl
-                )
-            else:
-                self.connection.send_message(payload)
+            self.connection.sendmail(rcpt_from, mail_to, pl)
             return None, ""
         except smtplib.SMTPRecipientsRefused as refused:
-            log.info("[{}] {} all recipients were refused: {}".format(gw.gwid, transmission.tx_id, refused))
+            log.info("[{}] {} all recipients in list {} were refused: {}"
+                .format(gw.gwid, txid, mail_to, refused)
+            )
             return "42", "SMTP error (all recipients were refused)"
         except smtplib.SMTPSenderRefused:
-            log.info("[{}] {} refused sender {}".format(gw.gwid, transmission.tx_id, transmission.message.origin))
+            log.info("[{}] {} sender {} refused".format(gw.gwid, txid, rcpt_from))
             return "41", "SMTP error (sender address refused)"
         except smtplib.SMTPException as smtpe:
-            log.info("[{}] {} refused sender {}".format(gw.gwid, transmission.tx_id, smtpe))
+            log.info("[{}] {} email not sent: {}".format(gw.gwid, txid, smtpe))
             return "40", "SMTP error (see gateway logs)"
 
+
+    def _parse_address_list(self, cdl):
+        if cdl is None: return ()
+        return list(map(
+            lambda e: email.utils.parseaddr(e)[1].split("@")[0].split("/")[0].replace("+", ""), 
+            cdl.split(",")
+        ))
+
+
+    def process_mo(self, m):
+        pass
+
+
+    def process_mt_ack(self, m):
+        txid = m['X-Mms-Message-Id']
+        log.debug("[{}] MT ack on transaction {}".format(self.gwid, txid))
+        tx = models.transaction.MMSTransaction(txid)
+        if tx is None:
+            log.warning("[{}] transaction {} not found".format(self.gwid, txid))
+            return None
+        destinations = self._parse_address_list(m['X-Mms-Request-Recipients']) or \
+            list(tx.destination | tx.cc | tx.bcc)
+        for d in destinations:
+            status = "ACKNOWLEDGED" if m['X-Mms-Request-Status-Code'].lower() == "ok" else "FAILED"
+            tx.set_state(d, status, m['X-Mms-Request-Status-Code'], m['X-Mms-Status-Text'], self.gwid)
+
+
+    def process_dlr(self, m):
+        txid = m['X-Mms-Message-Id']
+        tx = models.transaction.MMSTransaction(txid)
+        if tx is None:
+            log.warning("[{}] transaction {} not found".format(self.gwid, txid))
+            return None
+        log.debug("[{}] MT DLR on transaction {}".format(self.gwid, txid))
+
+        status = \
+            "DELIVERED" if m['X-Mms-MM-Status-Code'].lower() in [ "retrieved" ] else \
+            "FORWARDED" if m['X-Mms-MM-Status-Code'].lower() in [ "deferred", "indeterminate", "forwarded" ] else \
+            "FAILED" if m['X-Mms-MM-Status-Code'].lower() in [ "expired", "rejected", "unrecognised", "unrecognized" ] else \
+            "UNDEFINED"
+        status_text = ((m['X-Mms-MM-Status-Extension'] or "") + " " + m['X-Mms-Status-Text']).strip()
+        send_to_ua = m['X-Mms-Forward-To-Originator-UA'].lower() == "yes" if m['X-Mms-Forward-To-Originator-UA'] else False 
+        tx.set_state(d, status, m['X-Mms-MM-Status-Code'], status_text, self.gwid, m['X-Mms-Transaction-ID'],
+            extra={
+                'send_to_UA': send_to_ua, 
+                'app': m['X-Mms-Applic-ID'], 
+                'reply_app': m['X-Mms-Reply-Applic-ID'], 
+                'app_data': m['X-Mms-Aux-Applic-Info'] 
+            }
+        )
+
+        if m['X-Mms-Ack-Request'] is not None and m['X-Mms-Ack-Request'].lower() == "yes":
+            # provider asks for an ack on the DLR they sent
+            e = MIMEText("")
+            e['From'] = self.origin_prefix + m['To'] + self.origin_suffix
+            e['Sender'] = self.origin_prefix + m['To'] + self.origin__suffix
+            e['To'] = self.dest_prefix + m['From'] + self.dest_suffix
+            e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
+            e.add_header('X-Mms-Message-Type', "MM4_Delivery_report.RES")
+            e.add_header('X-Mms-Transaction-ID', m['X-Mms-Transaction-ID'])
+            e.add_header('X-Mms-Message-ID', m['X-Mms-Message-ID'])
+            e.add_header('X-Mms-Request-Status-Code', "Ok")
+            e.add_header('X-Mms-Status-Text', "Delivery report received")
+            self.send_to_mmsc(e, txid, "", "")
+
+
+    def process_rrr(self, m):
+        pass
+"""
+
+X-Mms-Transaction-ID:
+X-Mms-Request-Status-Code:
+X-Mms-Status-Text:
+"""
 
 class MM7Gateway(MMSGateway):
 
@@ -700,13 +808,13 @@ class MM7Gateway(MMSGateway):
         return top_part
 
 
-    def send_to_mmsc(self, payload, transmission):
+    def send_to_mmsc(self, payload, txid, from_addr=None, to_addrs=None):
 
         headers = {
             'SOAPAction': "\"\"",
             'Content-Type': "multipart/related; " +
                 "boundary=\"" + TOP_PART_BOUNDARY + "\"; " +
-                "start=\"" + transmission.tx_id + ".envelope\""
+                "start=\"" + txid + ".envelope\""
         }
         content_lines = payload.as_string().splitlines()
         content = ""; content_started = False
@@ -716,10 +824,10 @@ class MM7Gateway(MMSGateway):
             if content_started and not l.startswith("MIME-Version:"):
                 content += l + "\r\n"
         log.debug("[{}] sending {} MM7 with headers: {}"
-            .format(self.gwid, transmission.tx_id, headers)
+            .format(self.gwid, txid, headers)
         )
         log.debug("[{}] {} content: {}{}"
-            .format(self.gwid, transmission.tx_id, content[:4096], ("..." if len(content) > 4096 else ""))
+            .format(self.gwid, txid, content[:4096], ("..." if len(content) > 4096 else ""))
         )
         if len(content) > 4096:
             log.debug("[{}] ... {}".format(self.gwid, content[-256:]))
@@ -731,7 +839,7 @@ class MM7Gateway(MMSGateway):
                 timeout=self.peer_timeout
             )
             log.info("[{}] {} response status {}: {}"
-                .format(self.gwid, transmission.tx_id, rp.status_code, rp.text)
+                .format(self.gwid, txid, rp.status_code, rp.text)
             )
             if rp.ok:
                  # bad habit: MM7 does 200 OK responses, but indicate an error
@@ -739,7 +847,7 @@ class MM7Gateway(MMSGateway):
                      env = xmltodict.parse(rp.text)
                  except Exception as e:
                      log.warning("[{}] {} failed to xml-parse the SOAP envelope in MM7 response: {}"
-                         .format(self.gwid, transmission.tx_id, e)
+                         .format(self.gwid, txid, e)
                      )
                      return "51", "failed to xml-parse the SOAP envelope in MM7 response"
 

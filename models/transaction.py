@@ -2,6 +2,7 @@ import uuid
 import time
 import bottle
 import rq
+import requests
 
 from constants import *
 from backend.logger import log
@@ -109,6 +110,7 @@ def mm7_incoming(gw_group):
 class MMSTransaction(object):
 
     tx_id = None
+    last_req_id = None
     message = None
     gateway = ""
     gateway_id = ""
@@ -117,23 +119,14 @@ class MMSTransaction(object):
     bcc = set()
     linked_id = ""
     priority = ""
-    carrier_ref = ""
     report_url = ""
     created_ts = 0
     processed_ts = 0
-    rendered_ts = 0
-    sent_ts = 0
-#    forwarded_ts = 0
-#    forwarded_status = ""
-#    delivered_ts = 0
-#    delivered_status = ""
-#    read_reply_ts = 0
-#    read_reply_status = ""
-    final_status = ""
 
     def __init__(self, txid=None, msgid=None):
         if txid is None:
             self.tx_id = str(uuid.uuid4()).replace("-", "")
+            self.last_req_id = str(uuid.uuid4()).replace("-", "")
             self.created_ts = int(time.time())
             self.message = models.message.MMSMessage(msgid)
             self.save()
@@ -145,6 +138,7 @@ class MMSTransaction(object):
     def save(self):
         rdb.hmset('mmstx-' + self.tx_id, {
             'message_id': self.message.message_id,
+            'last_req_id': self.message.last_req_id,
             'gateway': self.gateway,
             'gateway_id': self.gateway_id,
             'destination': ",".join(self.destination),
@@ -156,15 +150,6 @@ class MMSTransaction(object):
             'report_url': self.report_url,
             'created_ts': self.created_ts,
             'processed_ts': self.processed_ts,
-            'rendered_ts': self.rendered_ts,
-            'sent_ts': self.sent_ts,
-#            'forwarded_ts': self.forwarded_ts,
-#            'forwarded_status': self.forwarded_status,
-#            'delivered_ts': self.delivered_ts,
-#            'delivered_status': self.delivered_status,
-#            'read_reply_ts': self.read_reply_ts,
-#            'read_reply_status': self.read_reply_status,
-            'final_status': self.final_status,
         })
 
 
@@ -172,6 +157,7 @@ class MMSTransaction(object):
         tx = rdb.hgetall('mmstx-' + txid)
         if tx:
             self.tx_id = txid
+            self.last_req_id = tx['last_req_id']
             self.message = models.message.MMSMessage(tx['message_id'])
             self.gateway_id = tx['gateway_id']
             self.gateway = tx['gateway']
@@ -187,20 +173,12 @@ class MMSTransaction(object):
             self.report_url = tx['report_url']
             self.created_ts = tx['created_ts']
             self.processed_ts = tx['processed_ts']
-            self.rendered_ts = tx['rendered_ts']
-            self.sent_ts = tx['sent_ts']
-#            self.forwarded_ts = tx['forwarded_ts']
-#            self.forwarded_status = tx['forwarded_status']
-#            self.delivered_ts = tx['delivered_ts']
-#            self.delivered_status = tx['delivered_status']
-#            self.read_reply_ts = tx['read_reply_ts']
-#            self.read_reply_status = tx['read_reply_status']
-            self.final_status = tx['final_status']
 
 
     def to_dict(self):
         return {
             'transaction_id': self.tx_id,
+            'last_req_id': self.last_req_id,
             'message_id': self.message.message_id,
             'gateway_id': self.gateway_id,
             'gateway': self.gateway,
@@ -213,15 +191,6 @@ class MMSTransaction(object):
             'report_url': self.report_url,
             'created_ts': self.created_ts,
             'processed_ts': self.processed_ts,
-            'rendered_ts': self.rendered_ts,
-            'sent_ts': self.sent_ts,
-#            'forwarded_ts': self.forwarded_ts,
-#            'forwarded_status': self.forwarded_status,
-#            'delivered_ts': self.delivered_ts,
-#            'delivered_status': self.delivered_status,
-#            'read_reply_ts': self.read_reply_ts,
-#            'read_reply_status': self.read_reply_status,
-            'final_status': self.final_status,
         }
 
 
@@ -235,4 +204,43 @@ class MMSTransaction(object):
             ttl=30
         )
         log.info("[{}] transmission {} queued for processing".format(gateway, self.tx_id))
+        self.set_state([], "SCHEDULED")
+
+
+    def set_state(self, dest, state, err="", desc="", gwid="", provider_id=None, extra=None):
+
+        s = {
+            "state": state,
+            "code": err,
+            "description": desc,
+            "gateway": gwid,
+            "timestamp": int(time.time())
+        }
+        if provider_id is not None:
+            s['provider_id'] = provider_id
+        if extra:
+            s.update(extra)
+
+        if len(dest):
+            for d in dest:
+                k = "mmstx-stat-" + self.tx_id + "-" + d
+                rdb.hmset(k, s)
+                rdb.expireat(k, int(time.time()) + MMSTX_TTL)
+        else:
+            k = "mmstx-stat-" + self.tx_id
+            rdb.hmset(k, s)
+            rdb.expireat(k, int(time.time()) + MMSTX_TTL)
+
+        # callback to the app if necessary
+        s['transaction_id'] = self.tx_id
+        if len(dest):
+            self['destinations'] = dest
+        q_cb = rq.Queue("QCB", connection=rdbq)
+        url_list = self.report_url.split(",") + gw.report_url.split(",")
+        for url in url_list:
+            q_cb.enqueue_call(func='models.transaction.send_event', args=( url, s ))
+
+
+def send_event(url, content):
+    rp = requests.post(url, json=content)
 
