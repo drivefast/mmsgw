@@ -15,17 +15,17 @@ from backend.logger import log
 from backend.storage import rdbq
 
 
-def dispatch(peer, sender, receivers, content):
+def dispatch(content, sender, receivers, source=None):
 
-    log.debug(">>>> {} inbound on MM4 interface - From: {}, To: {}"
-        .format(peer, sender, receivers)
+    log.info(">>>> {} inbound on MM4 interface - From: {}, To: {}"
+        .format(source or "", sender, receivers)
     )
 
     # get a gateway that can handle the message; preference is to search 
     # by receiver address first, by sending host next, and by sender address last
     gw = \
         cfg['receivers'].get(email.utils.parseaddr(receivers[0])[1]) or \
-        cfg['peers'].get(peer[0]) or \
+        cfg['peers'].get(source[0]) if source is not None else None or \
         cfg['senders'].get(email.utils.parseaddr(sender)[1])
     if gw is None:
         log.warning(">>>> no gateway to process this email")
@@ -38,8 +38,6 @@ def dispatch(peer, sender, receivers, content):
     if cfg['general'].get('smtp_host'):
         with open(fn, "w") as fh:
             fh.write(content)
-    if cfg['general'].get('spool_dir'):
-        shutil.move(peer, fn)
 
     # post a task for the gateway parser
     q_rx = rq.Queue("QRX-" + gw, connection=rdbq)
@@ -77,10 +75,9 @@ class MaildirEventHandler(pyinotify.ProcessEvent):
             with open(fn, "r") as fh:
                 raw_msg = fh.read()
                 msg = email.message_from_string(raw_msg)
-                dispatch(fn,
+                dispatch(raw_msg,
                     msg.get('from'), 
-                    email.utils.getaddresses(msg.get_all('to')), 
-                    raw_msg
+                    email.utils.getaddresses(msg.get_all('to')) 
                 )
         except email.errors.MessageParseError as me:
             log.warning(">>>> MM4 file watcher failed to parse {}: {}"
@@ -93,7 +90,7 @@ class MaildirEventHandler(pyinotify.ProcessEvent):
 
 class MM4SMTPServer(SMTPServer):
     def process_message(self, sender_host, from_addr, to_addr, data):
-        return dispatch(sender_host, from_addr, to_addr, data)
+        return dispatch(data, from_addr, to_addr, sender_host)
 
 
 if len(sys.argv) < 2:

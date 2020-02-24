@@ -29,8 +29,8 @@ def enqueue_mms_transaction(msgid):
     tx.priority = pri if pri in ACCEPTED_MESSAGE_PRIORITIES else "normal"
     tx.report_url = tj.get('report_url', "")
 
-    tx.save()
     tx.nq(tj.get('gateway'))
+    tx.save()
     return tx.to_dict()
 
 
@@ -119,6 +119,7 @@ class MMSTransaction(object):
     bcc = set()
     linked_id = ""
     priority = ""
+    carrier_ref = ""
     report_url = ""
     created_ts = 0
     processed_ts = 0
@@ -138,7 +139,7 @@ class MMSTransaction(object):
     def save(self):
         rdb.hmset('mmstx-' + self.tx_id, {
             'message_id': self.message.message_id,
-            'last_req_id': self.message.last_req_id,
+            'last_req_id': self.last_req_id,
             'gateway': self.gateway,
             'gateway_id': self.gateway_id,
             'destination': ",".join(self.destination),
@@ -154,25 +155,25 @@ class MMSTransaction(object):
 
 
     def load(self, txid):
-        tx = rdb.hgetall('mmstx-' + txid)
-        if tx:
+        txd = rdb.hgetall("mmstx-" + txid)
+        if txd:
             self.tx_id = txid
-            self.last_req_id = tx['last_req_id']
-            self.message = models.message.MMSMessage(tx['message_id'])
-            self.gateway_id = tx['gateway_id']
-            self.gateway = tx['gateway']
-            l = tx.get('destination', "")
+            self.last_req_id = txd['last_req_id']
+            self.message = models.message.MMSMessage(txd['message_id'])
+            self.gateway_id = txd['gateway_id']
+            self.gateway = txd['gateway']
+            l = txd.get('destination', "")
             self.destination = set(l.split(",")) if len(l) > 0 else set()
-            l = tx.get('cc', "")
+            l = txd.get('cc', "")
             self.cc = set(l.split(",")) if len(l) > 0 else set()
-            l = tx.get('bcc', "")
+            l = txd.get('bcc', "")
             self.bcc = set(l.split(",")) if len(l) > 0 else set()
-            self.linked_id = tx['linked_id']
-            self.priority = tx['priority']
-            self.carrier_ref = tx['carreir_ref']
-            self.report_url = tx['report_url']
-            self.created_ts = tx['created_ts']
-            self.processed_ts = tx['processed_ts']
+            self.linked_id = txd['linked_id']
+            self.priority = txd['priority']
+            self.carrier_ref = txd['carrier_ref']
+            self.report_url = txd['report_url']
+            self.created_ts = txd['created_ts']
+            self.processed_ts = txd['processed_ts']
 
 
     def to_dict(self):
@@ -234,11 +235,11 @@ class MMSTransaction(object):
         # callback to the app if necessary
         s['transaction_id'] = self.tx_id
         if len(dest):
-            self['destinations'] = dest
+            s['destinations'] = dest
         q_cb = rq.Queue("QCB", connection=rdbq)
-        url_list = self.report_url.split(",") + gw.report_url.split(",")
-        for url in url_list:
-            q_cb.enqueue_call(func='models.transaction.send_event', args=( url, s ))
+#        url_list = self.report_url.split(",") + gw.report_url.split(",")
+#        for url in url_list:
+#            q_cb.enqueue_call(func='models.transaction.send_event', args=( url, s ))
 
 
 def send_event(url, content):

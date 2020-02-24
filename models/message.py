@@ -25,8 +25,9 @@ def create_mms_message():
     m = MMSMessage()
 
     m.origin = mj.get('origin', "")
+    m.show_sender = -1
     if type(mj.get('show_sender')) == bool:
-        m.show_sender = 1 if mj['show_sender'] else -1
+        m.show_sender = 1 if mj['show_sender'] else 0
     m.subject = mj.get('subject', "")
     m.earliest_delivery = mj.get('earliest_delivery', 0)
     m.expire_after = mj.get('expire_after', 0)
@@ -34,13 +35,15 @@ def create_mms_message():
     m.message_class = mj.get('message_class', "") if mj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
     m.content_class = mj.get('content_class', "") if mj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
     m.charged_party = mj.get('charged_party', "") if mj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY else ""
+    m.drm = -1
     if type(mj.get('drm')) == bool:
-        m.drm = 1 if mj['drm'] else -1
+        m.drm = 1 if mj['drm'] else 0
+    m.content_adaptation = -1
     if type(mj.get('content_adaptation')) == bool:
-        m.content_adaptation = 1 if mj.get('content_adaptation') else -1
+        m.content_adaptation = 1 if mj.get('content_adaptation') else 0
+    m.can_redistribute = -1
     if type(mj.get('can_redistribute')) == bool:
-        m.can_redistribute = 1 if mj.get('can_redistribute') else -1
-
+        m.can_redistribute = 1 if mj.get('can_redistribute') else 0
 
     parts = []
     for pj in mj.get('parts', []):
@@ -85,7 +88,7 @@ def update_mms_message(msgid):
         if mj.get('origin'):
             m.origin = mj['origin']
         if type(mj.get('show_sender')) == bool:
-            m.show_sender = 1 if mj['show_sender'] else -1
+            m.show_sender = 1 if mj['show_sender'] else 0
         if mj.get('subject'):
             m.subject = mj['subject']
         if mj.get('earliest_delivery'):
@@ -101,11 +104,11 @@ def update_mms_message(msgid):
         if mj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY:
             m.charged_party = mj['charged_party'].lower()
         if type(mj.get('drm')) == bool:
-            m.drm = 1 if mj['drm'] else -1
+            m.drm = 1 if mj['drm'] else 0
         if type(mj.get('content_adaptation')) == bool:
-            m.content_adaptation = 1 if mj['content_adaptation'] else -1
+            m.content_adaptation = 1 if mj['content_adaptation'] else 0
         if type(mj.get('can_redistribute')) == bool:
-            m.can_redistribute = 1 if mj['can_redistribute'] else -1
+            m.can_redistribute = 1 if mj['can_redistribute'] else 0
 
         for pj in mj.get('parts', []):
             if pj is None:
@@ -216,7 +219,7 @@ class MMSMessage(object):
         if msg:
             self.message_id = msgid
             self.origin = msg.get('origin', "")
-            self.show_sender = msg.get('show_sender', 0)
+            self.show_sender = msg.get('show_sender', -1)
             self.subject = msg.get('subject', "")
             self.earliest_delivery = msg.get('earliest_delivery', 0)
             self.expire_after = msg.get('expire_after', 0)
@@ -224,9 +227,9 @@ class MMSMessage(object):
             self.charged_party = msg.get('charged_party', "")
             self.message_class = msg.get('message_class', "")
             self.content_class = msg.get('content_class', "")
-            self.drm = msg.get('drm', 0)
-            self.content_adaptation = msg.get('content_adaptation', 0)
-            self.can_redistribute = msg.get('can_redistribute', 0)
+            self.drm = msg.get('drm', -1)
+            self.content_adaptation = msg.get('content_adaptation', -1)
+            self.can_redistribute = msg.get('can_redistribute', -1)
             self.parts = msg.get('parts', "").split(",")
 
 

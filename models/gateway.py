@@ -97,16 +97,13 @@ def send_mms(txid):
             if m:
                 log.debug("[{}] {} prepared for transmission".format(gw.gwid, txid))
                 if gw.protocol == "MM4":
-                    src_addr = gw.originator_addr or gw.origin_prefix + tx.message.origin + gw.origin_suffix
+                    src_addr = gw.origin_prefix + tx.message.origin + gw.origin_suffix
                     if "@" not in src_addr:
-                        src_addr += "@" + gw.local_host
-                    if gw.recipient_addr is not None:
-                        dest_addr = [ gw.recipient_addr ]
-                    else:
-                        dest_addr = list(map(lambda a: 
-                            gw.dest_prefix + a + gw.dest_suffix + 
-                            (("@" + gw.remote_peer) if "@" not in gw.dest_suffix else "")
-                        , tx.destination | tx.cc | tx.bcc))
+                        src_addr += "@" + gw.local_domain
+                    dest_addr = list(map(lambda a: 
+                        gw.dest_prefix + a + gw.dest_suffix + 
+                        (("@" + gw.remote_domain) if "@" not in gw.dest_suffix else "")
+                    , tx.destination | tx.cc | tx.bcc))
                     ret_code, ret_desc = gw.send_to_mmsc(m, txid, src_addr, dest_addr)
                 else:
                     ret_code, ret_desc = gw.send_to_mmsc(m, txid)
@@ -127,13 +124,13 @@ def send_mms(txid):
 #        for url in url_list:
 #            q_cb.enqueue_call(func='models.transmission.send_event', args=( url, txid, ))
 
-        tx.set_state([], "FAILED", ret_code.zfill(4), ret_desc, self.gwid, ret_desc)
+        tx.set_state([], "FAILED", ret_code.zfill(4), ret_desc, gw.gwid, ret_desc)
         if len(ret_code) > 1:
             # only reschedule for external, environmental errors
             reschedule(this_job, gw.q_tx)
 
 
-def mm4rx(fn, mailto, rcptfrom):
+def mm4rx(fn):
     # handle received MM4 SMTP message
     gw = THIS_GW
     jid = rq.get_current_job().id
@@ -233,8 +230,8 @@ class MMSGateway(object):
     # outbound
     secure = False
     remote_peer = None       # SMTP remote server for MM4, as ( host, port ) tuple; MMSC URL for MM7
+    local_host = None        # identification of the local server (fqdn) for MM4; URL to local for MM7
     auth = None              # authentiation to use for transmitting messages, as ( user, password ) tuple
-    local_host = None        # identification of the local server
     ssl_certificate = None   # ( keyfile, certfile ) tuple, MM4 only
 
     # inbound
@@ -273,9 +270,9 @@ class MMSGateway(object):
 
         self.secure = cfg['outbound'].get('secure_connection', "").lower() in ("yes", "true", "t", "1")
         self.remote_peer = [ cfg['outbound'].get('remote_host', "localhost"), 0 ]
+        self.local_host = cfg['outbound'].get('local_host', "")
         if len(cfg['outbound'].get('username', "")) > 0 and len(cfg['outbound'].get('password', "")) > 0:
             self.auth = ( cfg['outbound']['username'], cfg['outbound']['password'] )
-        self.local_host = cfg['outbound'].get('local_host', "")
 
         self.dest_prefix = cfg['addressing'].get('dest_prefix', "")
         self.dest_suffix = cfg['addressing'].get('dest_suffix', "")
@@ -294,7 +291,8 @@ class MMSGateway(object):
 class MM4Gateway(MMSGateway):
 
     connection = None
-    server = None
+    remote_domain = None
+    local_domain = None
     originator_addr = None
     recipient_addr = None
     mmsip_addr = None
@@ -310,6 +308,8 @@ class MM4Gateway(MMSGateway):
     def config(self, cfg):
         super(MM4Gateway, self).config(cfg)
         self.remote_peer[1] = int(cfg['outbound'].get('remote_port', (465 if self.secure else 25)))
+        self.remote_domain = cfg['outbound'].get('remote_domain')
+        self.local_domain = cfg['outbound'].get('local_domain')
         self.originator_addr = cfg['outbound'].get('originator_address')
         self.recipient_addr = cfg['outbound'].get('recipient_address')
         keyfile = cfg['outbound'].get('keyfile')
@@ -393,8 +393,9 @@ class MM4Gateway(MMSGateway):
 
         e = MIMEMultipart("related", boundary=TOP_PART_BOUNDARY)
 
+        e['Date'] = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
         e['From'] = self.origin_prefix + tx.message.origin + self.origin_suffix
-        e['Sender'] = self.originator_address
+        e['Sender'] = self.originator_addr
         e['Subject'] = tx.message.subject
         if len(tx.destination):
             e['To'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.destination))
@@ -455,30 +456,31 @@ class MM4Gateway(MMSGateway):
         e.add_header("X-Mms-Message-Type", "MM4_forward.REQ")
         e.add_header("X-Mms-Transaction-ID", tx.last_req_id)
         e.add_header("X-Mms-Message-ID", tx.tx_id)
-        if tx.message.expire_after:
+        if tx.message.expire_after > 0:
             e.add_header("X-Mms-Expiry", tx.message.expire_after)
         if tx.message.message_class:
             e.add_header("X-Mms-Message-Class", tx.message.message_class)
         if tx.priority:
             e.add_header("X-Mms-Priority", tx.priority)
         if self.request_ack:
-            e.add_header("X-Mms-Ack-Request", "1")
+            e.add_header("X-Mms-Ack-Request", "Yes")
+            e.add_header("X-Mms-Originator-System", self.originator_addr)
         if self.request_dlr:
-            e.add_header("X-Mms-Delivery-Report", "1")
+            e.add_header("X-Mms-Delivery-Report", "Yes")
         if self.request_rrr:
-            e.add_header("X-Mms-Read-Reply", "1")
+            e.add_header("X-Mms-Read-Reply", "Yes")
 #        e.add_header("X-Mms-Originator-R/S-Delivery-Report", self.request_rrr)
         if tx.message.show_sender >= 0:
-            e.add_header("X-Mms-Sender-Visibility", str(tx.message.show_sender))
+            e.add_header("X-Mms-Sender-Visibility", "Show" if tx.message.show_sender == 1 else "Hide")
         e.add_header("X-Mms-Forward-Counter", "1")
 #        e.add_header("X-Mms-Previously-sent-by", self.x)
 #        e.add_header("X-Mms-Previously-sent-date-and-time", self.x)
         if tx.message.content_adaptation >= 0:
-            e.add_header("X-Mms-Adaptation-Allowed", str(tx.message.content_adaptation))
+            e.add_header("X-Mms-Adaptation-Allowed", "Yes" if tx.message.content_adaptation == 1 else "No")
         if tx.message.content_class:
             e.add_header("X-Mms-Content-Class", tx.message.content_class)
         if tx.message.drm >= 0:
-            e.add_header("X-Mms-Drm-Content", str(tx.message.drm))
+            e.add_header("X-Mms-Drm-Content", "Yes" if tx.message.drm == 1 else "No")
         e.add_header("X-Mms-Message-ID", tx.message.message_id)
         if self.applic_id:
             e.add_header("X-Mms-Applic-ID", self.applic_id)
@@ -486,10 +488,6 @@ class MM4Gateway(MMSGateway):
             e.add_header("X-Mms-Reply-Applic-ID", self.reply_applic_id)
         if self.aux_applic_info:
             e.add_header("X-Mms-Aux-Applic-Info", self.aux_applic_info)
-        if self.originator_system:
-            e.add_header("X-Mms-Originator-System", self.originator_addr)
-        if self.originator_recipient_address:
-            e.add_header("X-Mms-Originator-Recipient-Address", self.originator_addr)
         if self.mmsip_addr:
             e.add_header("X-Mms-MMSIP-Address", self.mmsip_addr)
         if self.forward_route:
@@ -537,14 +535,17 @@ class MM4Gateway(MMSGateway):
 
 
     def process_mt_ack(self, m):
-        txid = m['X-Mms-Message-Id']
-        log.debug("[{}] MT ack on transaction {}".format(self.gwid, txid))
+        txid = m['X-Mms-Message-Id'].replace("\"", "")
+        log.debug("[{}] {} MT ack: {}".format(self.gwid, txid, m.as_string()))
         tx = models.transaction.MMSTransaction(txid)
         if tx is None:
             log.warning("[{}] transaction {} not found".format(self.gwid, txid))
             return None
         destinations = self._parse_address_list(m['X-Mms-Request-Recipients']) or \
             list(tx.destination | tx.cc | tx.bcc)
+        log.info("[{}] {} ACK response for {}: {} {}"
+            .format(self.gwid, txid, destinations, m['X-Mms-Request-Status-Code'], m['X-Mms-Status-Text'])
+        )
         for d in destinations:
             status = "ACKNOWLEDGED" if m['X-Mms-Request-Status-Code'].lower() == "ok" else "FAILED"
             tx.set_state(d, status, m['X-Mms-Request-Status-Code'], m['X-Mms-Status-Text'], self.gwid)
@@ -556,7 +557,7 @@ class MM4Gateway(MMSGateway):
         if tx is None:
             log.warning("[{}] transaction {} not found".format(self.gwid, txid))
             return None
-        log.debug("[{}] MT DLR on transaction {}".format(self.gwid, txid))
+        log.debug("[{}] processing MT DLR on transaction {}".format(self.gwid, txid))
 
         status = \
             "DELIVERED" if m['X-Mms-MM-Status-Code'].lower() in [ "retrieved" ] else \
@@ -573,20 +574,27 @@ class MM4Gateway(MMSGateway):
                 'app_data': m['X-Mms-Aux-Applic-Info'] 
             }
         )
+        log.info("[{}] MT DLR on {} processed successfully".format(self.gwid, txid))
 
         if m['X-Mms-Ack-Request'] is not None and m['X-Mms-Ack-Request'].lower() == "yes":
+            if m.get('Sender') is None:
+                log.warning("[{}] {} MT DLR confirmation requested, but no address to send it to".format(self.gwid, txid))
+                return
             # provider asks for an ack on the DLR they sent
+            log.info("[{}] {} MT DLR confirmation requested to {}".format(self.gwid, txid, m['Sender']))
             e = MIMEText("")
-            e['From'] = self.origin_prefix + m['To'] + self.origin_suffix
-            e['Sender'] = self.origin_prefix + m['To'] + self.origin__suffix
-            e['To'] = self.dest_prefix + m['From'] + self.dest_suffix
+            e['From'] = self.originator_addr
+            e['Sender'] = self.originator_addr
+            e['To'] = m['Sender']
             e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
             e.add_header('X-Mms-Message-Type', "MM4_Delivery_report.RES")
             e.add_header('X-Mms-Transaction-ID', m['X-Mms-Transaction-ID'])
             e.add_header('X-Mms-Message-ID', m['X-Mms-Message-ID'])
             e.add_header('X-Mms-Request-Status-Code', "Ok")
             e.add_header('X-Mms-Status-Text', "Delivery report received")
-            self.send_to_mmsc(e, txid, "", "")
+            ret_code, ret_desc = self.send_to_mmsc(e, txid, self.originator_addr, m['Sender'])
+            if ret_code is not None:
+                log.warning("[{}] {} MT DLR confirmation failed: {}".format(self.gwid, txid, ret_desc))
 
 
     def process_rrr(self, m):
@@ -599,9 +607,6 @@ X-Mms-Status-Text:
 """
 
 class MM7Gateway(MMSGateway):
-
-    connection = None
-    server = None
 
     originator_system = None
     vaspid = None
