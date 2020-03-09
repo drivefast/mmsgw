@@ -12,11 +12,19 @@ import models.message
 import models.gateway
 
 
-@bottle.post(URL_ROOT + "/mms_send/<msgid>")
+@bottle.get(URL_ROOT + "mms/<txid>")
+def get_mms_transaction(txid):
+    tx = MMSTransaction(txid)
+    return tx.as_dict() if tx else \
+        json_error(404, "Not found", "MMS message transaction {} not found".format(txid))
+
+
+@bottle.post(URL_ROOT + "mms_send/<msgid>")
 def enqueue_mms_transaction(msgid):
     tj = bottle.request.json
     tx = MMSTransaction(msgid=msgid)
 
+    tx.direction = -1
     tx.destination = makeset(tj.get("destination"))
     tx.cc = makeset(tj.get('cc'))
     tx.bcc = makeset(tj.get('bcc'))
@@ -31,11 +39,11 @@ def enqueue_mms_transaction(msgid):
 
     tx.nq(tj.get('gateway'))
     tx.save()
-    return tx.to_dict()
+    return tx.as_dict()
 
 
 # handle MM7 requests received from carrier side
-@bottle.post(URL_ROOT + "/mm7/<gw_group>/incoming")
+@bottle.post(URL_ROOT + "mm7/<gw_group>/incoming")
 def mm7_incoming(gw_group):
     raw_content = bottle.request.body.read()
     log.info("{} request received, {} bytes".format(gw_group, bottle.request.headers['Content-Length']))
@@ -110,8 +118,10 @@ def mm7_incoming(gw_group):
 class MMSTransaction(object):
 
     tx_id = None
-    last_req_id = None
     message = None
+    provider_ref = ""    # X-MMS-Message-ID if carrier initiated
+    last_tran_id = None  # last X-MMS-Transaction-ID set by carrier
+    direction = 0
     gateway = ""
     gateway_id = ""
     destination = set()
@@ -119,15 +129,21 @@ class MMSTransaction(object):
     bcc = set()
     linked_id = ""
     priority = ""
-    carrier_ref = ""
+    handling_app = ""
+    reply_to_app = ""
+    app_info = ""
     report_url = ""
+    ack_requested = True
+    dlr_requested = False
+    rrr_requested = False
     created_ts = 0
     processed_ts = 0
+
 
     def __init__(self, txid=None, msgid=None):
         if txid is None:
             self.tx_id = str(uuid.uuid4()).replace("-", "")
-            self.last_req_id = str(uuid.uuid4()).replace("-", "")
+            self.last_tran_id = str(uuid.uuid4()).replace("-", "")
             self.created_ts = int(time.time())
             self.message = models.message.MMSMessage(msgid)
             self.save()
@@ -139,7 +155,9 @@ class MMSTransaction(object):
     def save(self):
         rdb.hmset('mmstx-' + self.tx_id, {
             'message_id': self.message.message_id,
-            'last_req_id': self.last_req_id,
+            'provider_ref': self.provider_ref,
+            'last_tran_id': self.last_tran_id,
+            'direction': self.direction,
             'gateway': self.gateway,
             'gateway_id': self.gateway_id,
             'destination': ",".join(self.destination),
@@ -147,8 +165,13 @@ class MMSTransaction(object):
             'bcc': ",".join(self.bcc),
             'linked_id': self.linked_id,
             'priority': self.priority,
-            'carrier_ref': self.carrier_ref,
+            'handling_app': self.handling_app,
+            'reply_to_app': self.reply_to_app,
+            'app_info': self.app_info,
             'report_url': self.report_url,
+            'ack_requested': 1 if self.ack_requested else 0,
+            'dlr_requested': 1 if self.dlr_requested else 0,
+            'rrr_requested': 1 if self.rrr_requested else 0,
             'created_ts': self.created_ts,
             'processed_ts': self.processed_ts,
         })
@@ -158,8 +181,10 @@ class MMSTransaction(object):
         txd = rdb.hgetall("mmstx-" + txid)
         if txd:
             self.tx_id = txid
-            self.last_req_id = txd['last_req_id']
             self.message = models.message.MMSMessage(txd['message_id'])
+            self.provider_ref = txd['provider_ref']
+            self.last_tran_id = txd['last_tran_id']
+            self.direction = txd['direction']
             self.gateway_id = txd['gateway_id']
             self.gateway = txd['gateway']
             l = txd.get('destination', "")
@@ -170,17 +195,23 @@ class MMSTransaction(object):
             self.bcc = set(l.split(",")) if len(l) > 0 else set()
             self.linked_id = txd['linked_id']
             self.priority = txd['priority']
-            self.carrier_ref = txd['carrier_ref']
+            self.handling_app = txd['handling_app']
+            self.reply_to_app = txd['reply_to_app']
+            self.app_info = txd['app_info']
             self.report_url = txd['report_url']
+            self.ack_requested = txd['ack_requested'] == 1
+            self.dlr_requested = txd['dlr_requested'] == 1
+            self.rrr_requested = txd['rrr_requested'] == 1
             self.created_ts = txd['created_ts']
             self.processed_ts = txd['processed_ts']
 
 
-    def to_dict(self):
-        return {
+    def as_dict(self):
+        d = {
             'transaction_id': self.tx_id,
-            'last_req_id': self.last_req_id,
-            'message_id': self.message.message_id,
+            'provider_ref': self.provider_ref,
+            'last_tran_id': self.last_tran_id,
+            'direction': self.direction,
             'gateway_id': self.gateway_id,
             'gateway': self.gateway,
             'destination': list(self.destination),
@@ -188,11 +219,32 @@ class MMSTransaction(object):
             'bcc': list(self.bcc),
             'linked_id': self.linked_id,
             'priority': self.priority,
-            'carrier_ref': self.carrier_ref,
+            'handling_app': self.handling_app,
+            'reply_to_app': self.reply_to_app,
+            'app_info': self.app_info,
             'report_url': self.report_url,
+            'ack_requested': self.ack_requested,
+            'dlr_requested': self.dlr_requested,
+            'rrr_requested': self.rrr_requested,
             'created_ts': self.created_ts,
             'processed_ts': self.processed_ts,
         }
+        if self.message:
+            d['message'] = self.message.as_dict()
+            all_parts = []
+            for pid in self.message.parts:
+                part = models.message.MMSMessagePart(pid)
+                if part:
+                    all_parts.append(part.as_dict())
+            d['message']['parts'] = all_parts
+        d['events'] = []
+        ev_keys = rdb.lrange('mmstx-' + self.tx_id + '-events', 0, -1)
+        for ev_key in ev_keys:
+            ev = rdb.hgetall(ev_key)
+            if ev:
+                d['events'].append(ev)
+
+        return d
 
 
     def nq(self, gateway):
@@ -211,11 +263,11 @@ class MMSTransaction(object):
     def set_state(self, dest, state, err="", desc="", gwid="", provider_id=None, extra=None):
 
         s = {
-            "state": state,
-            "code": err,
-            "description": desc,
-            "gateway": gwid,
-            "timestamp": int(time.time())
+            'state': state,
+            'code': err,
+            'description': desc,
+            'gateway': gwid,
+            'timestamp': int(time.time())
         }
         if provider_id is not None:
             s['provider_id'] = provider_id
@@ -231,6 +283,8 @@ class MMSTransaction(object):
             k = "mmstx-stat-" + self.tx_id
             rdb.hmset(k, s)
             rdb.expireat(k, int(time.time()) + MMSTX_TTL)
+        rdb.rpush('mmstx-' + self.tx_id + '-events', k)
+        rdb.expireat('mmstx-' + self.tx_id + '-events', int(time.time()) + MMSTX_TTL)
 
         # callback to the app if necessary
         s['transaction_id'] = self.tx_id

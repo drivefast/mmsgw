@@ -11,7 +11,7 @@ bottle.TEMPLATE_PATH.insert(0, API_ROOT + "views/")
 
 ## website stuff
 
-@bottle.get(URL_ROOT + "/test")
+@bottle.get(URL_ROOT + "test")
 def itworks():
     return "I'm the MMS gateway API, and your browser access works!"
 
@@ -20,7 +20,7 @@ def itworks():
 #def confirm_auth(agent):
 #    return "I'm the MMS gateway API, and your agent {} is authorized!".format(agent)
 
-@bottle.get(URL_ROOT + "/covfefe.png")
+@bottle.get(URL_ROOT + "covfefe.png")
 def serve_covfefe():
     return static_file("covfefe.png", root="")
 

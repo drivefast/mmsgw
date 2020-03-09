@@ -2,24 +2,25 @@ import time
 import uuid
 import json
 import bottle
+import mimetypes
 
 import traceback
 
 from constants import *
 from backend.logger import log
 from backend.storage import rdb
-from backend.util import makeset
+from backend.util import makeset, repo
 import models.transaction
 
 
-@bottle.get(URL_ROOT + "/mms_message/<msgid>")
+@bottle.get(URL_ROOT + "mms_message/<msgid>")
 def get_mms_message(msgid):
     m = MMSMessage(msgid)
     return m.as_dict() if m else \
         json_error(404, "Not found", "MMS message '{}' not found".format(msgid))
 
 
-@bottle.post(URL_ROOT + "/mms_message")
+@bottle.post(URL_ROOT + "mms_message")
 def create_mms_message():
     mj = bottle.request.json
     m = MMSMessage()
@@ -56,8 +57,7 @@ def create_mms_message():
                 continue
             p.content = pj.get('content', "")
             p.content_url = pj.get('content_url', "")
-            p.content_id = pj.get('content_id', "")
-            p.attachment_name = pj.get('attachment_name', "")
+            p.content_name = pj.get('content_name', p.part_id)
             p.save()
             if p.content_type == "application/smil":
                 # need to keep the smil in first position
@@ -80,7 +80,7 @@ def create_mms_message():
 
     return m.as_dict()
 
-@bottle.put(URL_ROOT + "/mms_message/<msgid>")
+@bottle.put(URL_ROOT + "mms_message/<msgid>")
 def update_mms_message(msgid):
     m = MMSMessage(msgid)
     if m:
@@ -124,8 +124,7 @@ def update_mms_message(msgid):
                     continue
                 p.content = pj.get('content', "")
                 p.content_url = pj.get('content_url', "")
-                p.content_id = pj.get('content_id', "")
-                p.attachment_name = pj.get('attachment_name', "")
+                p.content_name = pj.get('content_name', p.part_id)
                 p.save()
                 if p.content_type == "application/smil":
                     # need to keep the smil in first position
@@ -141,8 +140,8 @@ def update_mms_message(msgid):
         json_error(404, "Not found", "MMS message '{}' not found".format(msgid))
 
 
-@bottle.get(URL_ROOT + "/mms_part/<partid>")
-def get_mms_message(partid):
+@bottle.get(URL_ROOT + "mms_part/<partid>")
+def get_mms_part(partid):
     p = rdb.hgetall('mmspart-' + partid)
     if p is None:
         return json_error(404, "Not found", "MMS message part '{}' not found".format(partid))
@@ -150,8 +149,8 @@ def get_mms_message(partid):
     return p
 
 
-@bottle.post(URL_ROOT + "/mms_part")
-def create_mms_message():
+@bottle.post(URL_ROOT + "mms_part")
+def create_mms_part():
     pj = bottle.request.json
     p = MMSMessagePart()
     p.content_type = pj.get('content_type', "")
@@ -161,8 +160,7 @@ def create_mms_message():
         return json_error(400, "Bad request", "Either use 'content' OR 'content_url'")
     p.content = pj.get('content', "")
     p.content_url = pj.get('content_url', "")
-    p.content_id = pj.get('content_id', "")
-    p.attachment_name = pj.get('attachment_name', "")
+    p.content_name = pj.get('content_name', p.part_id)
 
     p.save()
     return p.as_dict()
@@ -232,7 +230,6 @@ class MMSMessage(object):
             self.can_redistribute = msg.get('can_redistribute', -1)
             self.parts = msg.get('parts', "").split(",")
 
-
     def as_email(self):
         return None
 
@@ -253,15 +250,37 @@ class MMSMessage(object):
                 ret['parts'].append(p.as_dict())
         return ret
 
+    def add_part_from_mime(self, ep, url_prefix=None):
+        p = MMSMessagePart()
+        p.content_name = ep['Content-Id'] or p.part_id
+        p.content_type = ep.get_content_type()
+        if p.content_type not in ACCEPTED_CONTENT_TYPES:
+            return '406', "Content type '{}' not accepted".format(ep['Content-Type'])
+        fn = ep.get_filename("") or (p.content_name + ACCEPTED_CONTENT_TYPES[p.content_type])
+        if p.content_type == "application/smil" or p.content_type.startswith("text/"):
+            p.content = ep.get_payload(decode=True)
+        elif p.content_type.startswith("image/") or p.content_type.startswith("audio/"):
+            try:
+                fh = open(repo(TMP_MEDIA_DIR, self.message_id + "-" + fn), "wb")
+                fh.write(ep.get_payload(decode=True))
+                fh.close()
+            except Exception as e:
+                return '500', "Failed saving file {} in {}: {}".format(fn, TMP_MEDIA_DIR, e)
+            p.content_url = (url_prefix or (API_URL + URL_ROOT)) + self.message_id + "-" + fn
+        else:
+            return '415', "Content type '{}' not handled".format(p.content_type)
+        p.save()
+        self.parts.append(p.part_id)
+        return '200', ""
+
 
 class MMSMessagePart(object):
 
     part_id = None
     content_url = ""
     content = None
-    content_id = ""
+    content_name = ""
     content_type = ""
-    attachment_name = ""
 
     def __init__(self, pid=None):
         if pid:
@@ -275,9 +294,8 @@ class MMSMessagePart(object):
     # save to storage
         rdb.hmset('mmspart-' + self.part_id, {
             'content_url': self.content_url,
-            'content_id': self.content_id,
+            'content_name': self.content_name,
             'content_type': self.content_type,
-            'attachment_name': self.attachment_name,
         })
         if self.content is not None:
             rdb.hset('mmspart-' + self.part_id, 'content', self.content)
@@ -291,9 +309,8 @@ class MMSMessagePart(object):
             self.part_id = pid
             self.content_url = p.get('content_url', "")
             self.content = p.get('content')
-            self.content_id = p.get('content_id', "")
+            self.content_name = p.get('content_name', "")
             self.content_type = p.get('content_type', "")
-            self.attachment_name = p.get('attachment_name', "")
 
     def as_email_part(self):
         return None
@@ -306,8 +323,7 @@ class MMSMessagePart(object):
             'part_id': self.part_id,
             'content_url': self.content_url,
             'content': self.content,
-            'content_id': self.content_id,
+            'content_name': self.content_name,
             'content_type': self.content_type,
-            'attachment_name': self.attachment_name,
         }
 

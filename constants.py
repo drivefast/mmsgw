@@ -3,9 +3,7 @@ import syslog
 import configparser
 
 API_ROOT = os.path.dirname(os.path.realpath(__file__)) + "/"
-URL_ROOT = "/mmsgw/v1"
-
-TMP_MEDIA_DIR = "/tmp/media"
+URL_ROOT = "/mmsgw/v1/"
 
 LOG_IDENT = "mmsgw"
 LOG_FACILITY = syslog.LOG_LOCAL4
@@ -13,13 +11,13 @@ LOG_FACILITY = syslog.LOG_LOCAL4
 ACCEPTED_MESSAGE_PRIORITIES = ("low", "normal", "high")
 ACCEPTED_MESSAGE_CLASSES = ("personal", "advertisement", "informational", "auto")
 ACCEPTED_CONTENT_CLASSES = ("text", "image-basic", "image-rich", "video-basic", "video-rich", "megapixel", "content-basic", "content-rich")
-ACCEPTED_CONTENT_TYPES = (
-    "application/smil",
-    "text/plain", 
-    "image/bmp", "image/gif", "image/jpeg", "image/tiff", "image/png",
-    "audio/basic", "audio/mid", "audio/mpeg", "audio/mp4", "audio/wav",
-)
 ACCEPTED_CHARGED_PARTY = ( "sender", "recipient", "both", "neither" )
+ACCEPTED_CONTENT_TYPES = {
+    'application/smil': ".smil",
+    'text/plain': ".txt", 
+    'image/bmp': ".bmp", 'image/gif': ".gif", 'image/jpeg': ".jpg", 'image/jpg': ".jpg", 'image/tiff': ".tif", 'image/png': ".png",
+    'audio/basic': ".au", 'audio/mid': ".mid", 'audio/mpeg': ".mpg", 'audio/mp4': ".mp4", 'audio/wav': ".wav",
+}
 
 MM7_VERSION = {
     'mm7': "6.8.0",

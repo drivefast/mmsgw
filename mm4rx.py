@@ -17,9 +17,14 @@ from backend.storage import rdbq
 
 def dispatch(content, sender, receivers, source=None):
 
-    log.info(">>>> {} inbound on MM4 interface - From: {}, To: {}"
-        .format(source or "", sender, receivers)
+    log.info(">>>> {} inbound on MM4 interface - From: {}, To: {}, length: {}"
+        .format(source or "", sender, receivers, len(content))
     )
+    log.debug(">>>> content: {}{}"
+        .format(content[:4096], ("..." if len(content) > 4096 else ""))
+    )
+    if len(content) > 4096:
+        log.debug(">>>> ...{}".format(content[-256:]))
 
     # get a gateway that can handle the message; preference is to search 
     # by receiver address first, by sending host next, and by sender address last
