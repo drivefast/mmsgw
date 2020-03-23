@@ -1,10 +1,6 @@
 import bottle
-#import requests
-#import json
-#import traceback
 
 from constants import *
-from backend.logger import log
 
 import models.message
 if ENABLE_TESTS:
