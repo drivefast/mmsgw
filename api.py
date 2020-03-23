@@ -1,28 +1,15 @@
 import bottle
-import requests
-import json
-import traceback
+#import requests
+#import json
+#import traceback
 
 from constants import *
 from backend.logger import log
+
 import models.message
-
-bottle.TEMPLATE_PATH.insert(0, API_ROOT + "views/")
-
-## website stuff
-
-@bottle.get(URL_ROOT + "test")
-def itworks():
-    return "I'm the MMS gateway API, and your browser access works!"
-
-#@bottle.get("/v1/<agent>/auth")
-#@auth_agent
-#def confirm_auth(agent):
-#    return "I'm the MMS gateway API, and your agent {} is authorized!".format(agent)
-
-@bottle.get(URL_ROOT + "covfefe.png")
-def serve_covfefe():
-    return static_file("covfefe.png", root="")
+if ENABLE_TESTS:
+    import tests.basic
+    import tests.example
 
 
 if __name__ == '__main__':

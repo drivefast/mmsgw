@@ -4,6 +4,7 @@ import configparser
 
 API_ROOT = os.path.dirname(os.path.realpath(__file__)) + "/"
 URL_ROOT = "/mmsgw/v1/"
+ENABLE_TESTS = True
 
 LOG_IDENT = "mmsgw"
 LOG_FACILITY = syslog.LOG_LOCAL4

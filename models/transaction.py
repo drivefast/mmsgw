@@ -4,6 +4,8 @@ import bottle
 import rq
 import requests
 
+import traceback
+
 from constants import *
 from backend.logger import log
 from backend.storage import rdb, rdbq
@@ -17,6 +19,41 @@ def get_mms_transaction(txid):
     tx = MMSTransaction(txid)
     return tx.as_dict() if tx else \
         json_error(404, "Not found", "MMS message transaction {} not found".format(txid))
+
+
+@bottle.post(URL_ROOT + "mms/<rxid>/<event:re:ack|dr|rr>")
+def enqueue_mms_mo_event(rxid, event):
+    # expected format: dictionary with the following keys
+    #    gateway: the gateway that this message needs to be sent thru
+    #    mo_from: the phone number that sent the original MO
+    #    transaction: our own transaction ID
+    #    provider_ref: provider's original id (X-Mms-Message-Id)
+    #    status: canonical status id
+    #    description: verbose description of the status
+    #    applies_to: phone number(s) this status applies to; missing means applies to all
+    ev = bottle.request.json()
+    if \
+        ev.get('gateway') is None or \
+        ev.get('transaction') is None or \
+        ev.get('provider_ref') is None or \
+        ev.get('status') is None or \
+        (event != "ack" and ev.get('mo_from') is None) or \
+        (event != "ack" and ev.get('applies_to') is None) \
+    :
+        json_error(400, "Bad Request", "Missing required parameter")
+
+    nums = list(ev.get('applies_to', ""))
+
+    q_ev = rq.Queue("QEV-" + ev['gateway'], connection=rdbq)
+    q_ev.enqueue_call(
+        func='models.gateway.mmsmo_event', 
+        args=( 
+            ev['transaction'], event, ev['provider_ref'],
+            ev['provider_ref'], ev['status'], ev['description'], 
+            ev.get('mo_from'), list(ev.get('applies_to', "")), 
+        ),
+        meta={ 'retries': MAX_EV_RETRIES }
+    )
 
 
 @bottle.post(URL_ROOT + "mms_send/<msgid>")
@@ -95,14 +132,14 @@ def mm7_incoming(gw_group):
         )
         return MM7Gateway.build_response("DeliverRsp", transaction_id, msgid, '1000')
 
-    dlr_meta = env.find(
+    dr_meta = env.find(
         "./{" + MM7_NAMESPACE['env'] + "}Body/{" + MM7_NAMESPACE['mm7'] + "}DeliveryReportReq"
     , MM7_NAMESPACE)
-    if dlr_meta:
+    if dr_meta:
         log.debug("Incoming message is a DLR")
         q_ev = rq.Queue("QEV-" + gw_group, connection=rdbq)
         q_ev.enqueue_call(
-            func='models.gateway.process_event', args=( transaction_id, dlr_meta, ), 
+            func='models.gateway.process_event', args=( transaction_id, dr_meta, ), 
             job_id=transaction_id,
             meta={ 'retries': MAX_EV_RETRIES },
             ttl=30
@@ -121,6 +158,7 @@ class MMSTransaction(object):
     message = None
     provider_ref = ""    # X-MMS-Message-ID if carrier initiated
     last_tran_id = None  # last X-MMS-Transaction-ID set by carrier
+    ack_at_addr = ""
     direction = 0
     gateway = ""
     gateway_id = ""
@@ -132,10 +170,10 @@ class MMSTransaction(object):
     handling_app = ""
     reply_to_app = ""
     app_info = ""
-    report_url = ""
-    ack_requested = True
-    dlr_requested = False
-    rrr_requested = False
+    events_url = ""
+    ack_requested = False
+    dr_requested = False
+    rr_requested = False
     created_ts = 0
     processed_ts = 0
 
@@ -157,6 +195,7 @@ class MMSTransaction(object):
             'message_id': self.message.message_id,
             'provider_ref': self.provider_ref,
             'last_tran_id': self.last_tran_id,
+            'ack_at_addr': self.ack_at_addr,
             'direction': self.direction,
             'gateway': self.gateway,
             'gateway_id': self.gateway_id,
@@ -168,10 +207,10 @@ class MMSTransaction(object):
             'handling_app': self.handling_app,
             'reply_to_app': self.reply_to_app,
             'app_info': self.app_info,
-            'report_url': self.report_url,
+            'events_url': self.events_url,
             'ack_requested': 1 if self.ack_requested else 0,
-            'dlr_requested': 1 if self.dlr_requested else 0,
-            'rrr_requested': 1 if self.rrr_requested else 0,
+            'dr_requested': 1 if self.dr_requested else 0,
+            'rr_requested': 1 if self.rr_requested else 0,
             'created_ts': self.created_ts,
             'processed_ts': self.processed_ts,
         })
@@ -184,6 +223,7 @@ class MMSTransaction(object):
             self.message = models.message.MMSMessage(txd['message_id'])
             self.provider_ref = txd['provider_ref']
             self.last_tran_id = txd['last_tran_id']
+            self.ack_at_addr = txd['ack_at_addr']
             self.direction = txd['direction']
             self.gateway_id = txd['gateway_id']
             self.gateway = txd['gateway']
@@ -198,10 +238,10 @@ class MMSTransaction(object):
             self.handling_app = txd['handling_app']
             self.reply_to_app = txd['reply_to_app']
             self.app_info = txd['app_info']
-            self.report_url = txd['report_url']
+            self.events_url = txd['events_url']
             self.ack_requested = txd['ack_requested'] == 1
-            self.dlr_requested = txd['dlr_requested'] == 1
-            self.rrr_requested = txd['rrr_requested'] == 1
+            self.dr_requested = txd['dr_requested'] == 1
+            self.rr_requested = txd['rr_requested'] == 1
             self.created_ts = txd['created_ts']
             self.processed_ts = txd['processed_ts']
 
@@ -211,6 +251,7 @@ class MMSTransaction(object):
             'transaction_id': self.tx_id,
             'provider_ref': self.provider_ref,
             'last_tran_id': self.last_tran_id,
+            'ack_at_addr': self.ack_at_addr,
             'direction': self.direction,
             'gateway_id': self.gateway_id,
             'gateway': self.gateway,
@@ -222,10 +263,10 @@ class MMSTransaction(object):
             'handling_app': self.handling_app,
             'reply_to_app': self.reply_to_app,
             'app_info': self.app_info,
-            'report_url': self.report_url,
+            'events_url': self.events_url,
             'ack_requested': self.ack_requested,
-            'dlr_requested': self.dlr_requested,
-            'rrr_requested': self.rrr_requested,
+            'dr_requested': self.dr_requested,
+            'rr_requested': self.rr_requested,
             'created_ts': self.created_ts,
             'processed_ts': self.processed_ts,
         }
@@ -290,12 +331,10 @@ class MMSTransaction(object):
         s['transaction_id'] = self.tx_id
         if len(dest):
             s['destinations'] = dest
-        q_cb = rq.Queue("QCB", connection=rdbq)
-#        url_list = self.report_url.split(",") + gw.report_url.split(",")
+        q_cb = rq.Queue("QEV", connection=rdbq)
+#        url_list = self.events_url.split(",") + gw.events_url.split(",")
 #        for url in url_list:
-#            q_cb.enqueue_call(func='models.transaction.send_event', args=( url, s ))
+#            q_cb.enqueue_call("backend.util.cb_post", ( url, json.dumps(s), ))
 
 
-def send_event(url, content):
-    rp = requests.post(url, json=content)
 
