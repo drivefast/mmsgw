@@ -8,7 +8,7 @@ from backend.logger import log
 # the events_url setting in the gateway configuration would be handled here
 @bottle.post(URL_ROOT + "example/mmsevent")
 def mmsevent():
-    ev = bottle.request.json()
+    ev = bottle.request.json
     log.debug(">>>> example application received new message event: {}".format(ev))
     return {'type': "event"}
 
@@ -17,25 +17,26 @@ def mmsevent():
 # the mo_received_url setting in the gateway configuration would be handled here
 @bottle.post(URL_ROOT + "example/mmsmo")
 def mmsmo():
-    m = bottle.request.json()
+    m = bottle.request.json
     log.debug(">>>> example application received new message: {}".format(m))
     log.debug(">>>> id {} gateway '{}' from {} to {}: {}".format(
-        m['message']['messsage_id'], m['gateway'],
+        m['message']['message_id'], m['gateway'],
         m['message']['origin'], m['destination'], m['message']['subject']
     ))
     log.debug(">>>> parts:")
     for p in m['message']['parts']:
         if p['content']:
             content = p['content']
-        elif p['url']:
+        elif p['content_url']:
             content = "at" + p['content_url']
         log.debug(">>>>>>>> {} ({}): {}".format(p['content_name'], p['content_type'], content))
 
-    # TODO: you need to set this to be the URL where you send MO processing events
+    # TODO: you need to set this to be the URL of your MMS gateway, that's  where you send 
+    # MO processing events
     MMSGW_URL = "https://api.mmsgw.org/mmsgw/v1/"
 
     if m['ack_requested']:
-        # this needs to be called so that the gateway responds back to its peer that sent the MO
+        # we needs to calle the gateway to send an MO ACK to its peer
 
         # TODO: make your decision on whether you accept or reject the incoming MO, based on 
         #     whatever criteria you cere for: phone numbers, message content and size, etc

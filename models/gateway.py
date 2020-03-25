@@ -579,12 +579,13 @@ class MM4Gateway(MMSGateway):
         if "X-Mms-Message-Id" in m:
             msg = models.message.MMSMessage()
             rx = models.transaction.MMSTransaction()
-            rx.provider_ref = m['X-Mms-Message-Id']
-            rx.last_tran_id = m['X-Mms-Transaction-Id']
-            rx.ack_at_addr = m['X-Mms-Originator-System']
+            rx.provider_ref = m['X-Mms-Message-Id'].replace("\"", "")
+            rx.last_tran_id = m['X-Mms-Transaction-Id'].replace("\"", "")
+            rx.ack_at_addr = m['X-Mms-Originator-System'].replace("\"", "")
             rx.direction = 1
             rx.message_id = msg.message_id
             rx.gateway_id = self.gwid
+            rx.gateway = self.group
         else:
             log.warning("[{}] MM4 message missing X-Mms-Message-Id header".format(self.gwid))
             return
@@ -642,7 +643,7 @@ class MM4Gateway(MMSGateway):
         msg.save()
         rx.save()
         for n in all_recipients:
-            rx.set_state(n, "FORWARDED", "", "", rx.tx_id, m['X-Mms-Message-Id'], {})
+            rx.set_state(n, "FORWARDED", "", "", rx.tx_id, rx.provider_ref, {})
         log.debug("[{}] {} prepared message {} and reception record; will parse content"
             .format(self.gwid, rx.tx_id, msg.message_id)
         )

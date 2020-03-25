@@ -16,7 +16,7 @@ from backend.logger import log
 
 def cb_post(url, jdata):
     log.info(">>>> [callback] POSTing to {}: {}".format(url, jdata))
-    rq = requests.post(url, json=jdata)
+    rq = requests.post(url, json=json.loads(jdata))
     if rq.status_code >= 400:
         log.warning(">>>> [callback] POSTing to {} failed with status {}: {}"
             .format(url, rq.status_code, rq.text)
