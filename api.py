@@ -2,7 +2,7 @@ import bottle
 
 from constants import *
 
-import models.message
+import models.template
 if ENABLE_TESTS:
     import tests.basic
     import tests.example

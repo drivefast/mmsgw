@@ -1,329 +1,340 @@
-import time
 import uuid
-import json
+import time
 import bottle
-import mimetypes
+import rq
+import requests
 
 import traceback
 
 from constants import *
 from backend.logger import log
-from backend.storage import rdb
-from backend.util import makeset, repo
-import models.transaction
+from backend.storage import rdb, rdbq
+from backend.util import makeset
+import models.template
+import models.gateway
 
 
-@bottle.get(URL_ROOT + "mms_message/<msgid>")
-def get_mms_message(msgid):
+@bottle.get(URL_ROOT + "mt/<msgid>")
+@bottle.get(URL_ROOT + "mo/<msgid>")
+def get_mms(msgid):
     m = MMSMessage(msgid)
     return m.as_dict() if m else \
-        json_error(404, "Not found", "MMS message '{}' not found".format(msgid))
+        json_error(404, "Not found", "MMS message transaction {} not found".format(msgid))
 
 
-@bottle.post(URL_ROOT + "mms_message")
-def create_mms_message():
+@bottle.post(URL_ROOT + "mt/<template_id>")
+def enqueue_mms_mt(template_id):
     mj = bottle.request.json
-    m = MMSMessage()
+    m = MMSMessage(template_id=template_id)
 
-    m.origin = mj.get('origin', "")
-    m.show_sender = -1
-    if type(mj.get('show_sender')) == bool:
-        m.show_sender = 1 if mj['show_sender'] else 0
-    m.subject = mj.get('subject', "")
-    m.earliest_delivery = mj.get('earliest_delivery', 0)
-    m.expire_after = mj.get('expire_after', 0)
-    m.deliver_latest = mj.get('deliver_latest', 0)
-    m.message_class = mj.get('message_class', "") if mj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
-    m.content_class = mj.get('content_class', "") if mj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
-    m.charged_party = mj.get('charged_party', "") if mj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY else ""
-    m.drm = -1
-    if type(mj.get('drm')) == bool:
-        m.drm = 1 if mj['drm'] else 0
-    m.content_adaptation = -1
-    if type(mj.get('content_adaptation')) == bool:
-        m.content_adaptation = 1 if mj.get('content_adaptation') else 0
-    m.can_redistribute = -1
-    if type(mj.get('can_redistribute')) == bool:
-        m.can_redistribute = 1 if mj.get('can_redistribute') else 0
+    m.direction = -1
+    m.destination = makeset(mj.get("destination"))
+    m.cc = makeset(mj.get('cc'))
+    m.bcc = makeset(mj.get('bcc'))
+    # make sure we have destination numbers
+    if (len(m.destination) + len(m.cc) + len(m.cc)) == 0:
+        return json_error(400, "Bad request", "No destinations")
 
-    parts = []
-    for pj in mj.get('parts', []):
-        if type(pj) is dict:
-            p = MMSMessagePart()
-            p.content_type = pj.get('content_type', "")
-            if p.content_type not in ACCEPTED_CONTENT_TYPES:
-                continue
-            if len(pj.get('content', "")) > 0 and len(pj.get('content_url', "")) > 0:
-                continue
-            p.content = pj.get('content', "")
-            p.content_url = pj.get('content_url', "")
-            p.content_name = pj.get('content_name', p.part_id)
-            p.save()
-            if p.content_type == "application/smil":
-                # need to keep the smil in first position
-                m.parts.insert(0, p.part_id)
-            else:
-                m.parts.append(p.part_id)
-        elif isinstance(pj, basestring) and rdb.exists("mmspart-" + pj):
-            m.parts.append(pj)
+    m.linked_id = mj.get('linked_id', "")
+    pri = mj.get('priority', "").lower()
+    m.priority = pri if pri in ACCEPTED_MESSAGE_PRIORITIES else "normal"
+    m.report_url = mj.get('report_url', "")
 
+    m.nq(mj.get('gateway'))
     m.save()
-
-    tj = mj.get('send')
-    if tj:
-        # caller opted for the message to be sent out right away, build a transmission
-        t = models.transaction.MMSTransaction(message=m.message_id, gateway=tj.get('gateway', DEFAULT_GATEWAY))
-        t.destination = makeset(tj.get("destination"))
-        t.cc = makeset(tj.get('cc'))
-        t.bcc = makeset(tj.get('bcc'))
-        t.nq()
-
     return m.as_dict()
 
-@bottle.put(URL_ROOT + "mms_message/<msgid>")
-def update_mms_message(msgid):
-    m = MMSMessage(msgid)
-    if m:
-        mj = bottle.request.json
-        if mj.get('origin'):
-            m.origin = mj['origin']
-        if type(mj.get('show_sender')) == bool:
-            m.show_sender = 1 if mj['show_sender'] else 0
-        if mj.get('subject'):
-            m.subject = mj['subject']
-        if mj.get('earliest_delivery'):
-            m.earliest_delivery = mj['earliest_delivery']
-        if mj.get('expire_after'):
-            m.expire_after = mj['expire_after']
-        if mj.get('deliver_latest'):
-            m.deliver_latest = mj['deliver_latest'] 
-        if mj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES:
-            m.message_class = mj['message_class'].lower()
-        if mj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES:
-            m.content_class = mj['content_class'].lower()
-        if mj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY:
-            m.charged_party = mj['charged_party'].lower()
-        if type(mj.get('drm')) == bool:
-            m.drm = 1 if mj['drm'] else 0
-        if type(mj.get('content_adaptation')) == bool:
-            m.content_adaptation = 1 if mj['content_adaptation'] else 0
-        if type(mj.get('can_redistribute')) == bool:
-            m.can_redistribute = 1 if mj['can_redistribute'] else 0
 
-        for pj in mj.get('parts', []):
-            if pj is None:
-                # first part item being null means to reset the mms parts list
-                m.parts = []
-                continue
-            if type(pj) is dict:
-                p = MMSMessagePart()
-                p.content_type = pj.get('content_type', "")
-                if p.content_type not in ACCEPTED_CONTENT_TYPES:
-                    continue
-                if len(pj.get('content', "")) > 0 and len(pj.get('content_url', "")) > 0:
-                    continue
-                p.content = pj.get('content', "")
-                p.content_url = pj.get('content_url', "")
-                p.content_name = pj.get('content_name', p.part_id)
-                p.save()
-                if p.content_type == "application/smil":
-                    # need to keep the smil in first position
-                    m.parts.insert(0, p.part_id)
-                else:
-                    m.parts.append(p.part_id)
-            elif isinstance(pj, basestring) and rdb.exists("mmspart-" + pj):
-                m.parts.append(pj)
+@bottle.post(URL_ROOT + "mo/<event:re:ack|dr|rr>/<rxid>")
+def enqueue_mms_mo_event(event, rxid):
+    # expected format: dictionary with the following keys
+    #    gateway: the gateway that this message needs to be sent thru
+    #    mo_from: the phone number that sent the original MO
+    #    transaction: our own transaction ID
+    #    provider_ref: provider's original id (X-Mms-Message-Id)
+    #    status: canonical status id
+    #    description: verbose description of the status
+    #    applies_to: phone number(s) this status applies to; missing means applies to all
+    ev = bottle.request.json()
+    if \
+        ev.get('gateway') is None or \
+        ev.get('transaction') is None or \
+        ev.get('provider_ref') is None or \
+        ev.get('status') is None or \
+        (event != "ack" and ev.get('mo_from') is None) or \
+        (event != "ack" and ev.get('applies_to') is None) \
+    :
+        json_error(400, "Bad Request", "Missing required parameter")
 
-        m.save()
-        return m.as_dict()
-    else:
-        json_error(404, "Not found", "MMS message '{}' not found".format(msgid))
+    nums = list(ev.get('applies_to', ""))
+
+    q_ev = rq.Queue("QEV-" + ev['gateway'], connection=rdbq)
+    q_ev.enqueue_call(
+        func='models.gateway.mmsmo_event', 
+        args=( 
+            ev['transaction'], event, ev['provider_ref'],
+            ev['provider_ref'], ev['status'], ev['description'], 
+            ev.get('mo_from'), list(ev.get('applies_to', "")), 
+        ),
+        meta={ 'retries': MAX_EV_RETRIES }
+    )
 
 
-@bottle.get(URL_ROOT + "mms_part/<partid>")
-def get_mms_part(partid):
-    p = rdb.hgetall('mmspart-' + partid)
-    if p is None:
-        return json_error(404, "Not found", "MMS message part '{}' not found".format(partid))
-    p['part_id'] = partid
-    return p
+# handle MM7 requests received from carrier side
+@bottle.post(URL_ROOT + "mo/<gw_group>")
+def mm7_incoming(gw_group):
+    raw_content = bottle.request.body.read()
+    log.info("{} request received, {} bytes".format(gw_group, bottle.request.headers['Content-Length']))
+    log.debug("raw content: {}...".format(raw_content[:4096]))
+    if len(raw_content) > 4096:
+        log.debug("... {}".format(raw_content[-256:]))
 
+    bottle.response.content_type = "text/xml"
+    mime_headers = "Mime-Version: 1.0\nContent-Type: " + bottle.request.headers['Content-Type']
 
-@bottle.post(URL_ROOT + "mms_part")
-def create_mms_part():
-    pj = bottle.request.json
-    p = MMSMessagePart()
-    p.content_type = pj.get('content_type', "")
-    if p.content_type not in ACCEPTED_CONTENT_TYPES:
-        return json_error(400, "Bad request", "Missing or invalid content type")    
-    if len(pj.get('content', "")) > 0 and len(pj.get('content_url', "")) > 0:
-        return json_error(400, "Bad request", "Either use 'content' OR 'content_url'")
-    p.content = pj.get('content', "")
-    p.content_url = pj.get('content_url', "")
-    p.content_name = pj.get('content_name', p.part_id)
+    # try parsing lightly, to determine what queue to place this in
+    m = email.message_from_string(mime_headers + "\n\n" + raw_content)
+    try:
+        if m.is_multipart():
+            parts = m.get_payload()
+            log.debug("handling as multipart, {} parts".format(len(parts)))
+            env_content = parts[0].get_payload(decode=True)
+            log.debug("SOAP envelope: {}".format(env_content))
+            env = ET.fromstring(env_content)
+        else:
+            log.debug("handling as single part")
+            env = ET.fromstring(m.get_payload(decode=True))
+    except ET.ParseError as e:
+        log.warning("{} failed to xml-parse the SOAP envelope: {}".format(gw_group, e))
+        return bottle.HTTPResponse(status=400, body="Failed to xml-parse the SOAP envelope")
 
-    p.save()
-    return p.as_dict()
+    # get the transaction tag, treat it as unique ID of the incoming message
+    transaction_tag = env.find(
+        "./{" + MM7_NAMESPACE['env'] + "}Header/{" + MM7_NAMESPACE['mm7'] + "}TransactionID"
+    , MM7_NAMESPACE)
+    if transaction_tag is None:
+        s = "SOAP envelope of received request invalid, at least missing a transaction ID"
+        log.warning(s)
+        return bottle.HTTPResponse(status=400, body=s)
+    transaction_id = transaction_tag.text.strip()
+
+    # try to identify the message type
+    mo_meta = env.find(
+        "./{" + MM7_NAMESPACE['env'] + "}Body/{" + MM7_NAMESPACE['mm7'] + "}DeliverReq"
+    , MM7_NAMESPACE)
+    if mo_meta:
+        log.debug("Incoming message is an MO")
+        q_rx = rq.Queue("QRX-" + gw_group, connection=rdbq)
+        q_rx.enqueue_call(
+            func='models.gateway.process_mo', args=( transaction_id, mo_meta, parts[1], ), 
+            job_id=transaction_id,
+            meta={ 'retries': MAX_RX_RETRIES },
+            ttl=30
+        )
+        return MM7Gateway.build_response("DeliverRsp", transaction_id, msgid, '1000')
+
+    dr_meta = env.find(
+        "./{" + MM7_NAMESPACE['env'] + "}Body/{" + MM7_NAMESPACE['mm7'] + "}DeliveryReportReq"
+    , MM7_NAMESPACE)
+    if dr_meta:
+        log.debug("Incoming message is a DLR")
+        q_ev = rq.Queue("QEV-" + gw_group, connection=rdbq)
+        q_ev.enqueue_call(
+            func='models.gateway.process_event', args=( transaction_id, dr_meta, ), 
+            job_id=transaction_id,
+            meta={ 'retries': MAX_EV_RETRIES },
+            ttl=30
+        )
+        return MM7Gateway.build_response("DeliveryReportRsp", transaction_id, msgid, '1000')
+
+    # handling for other MM7 requests (cancel, replace, read-reply, etc) go here 
+
+    log.warning("Unknown or unhandled message type")
+    return bottle.HTTPResponse(status=400, body="Unknown or unhandled message type")
 
 
 class MMSMessage(object):
 
-    message_id = None
-    ascii_rendering = None
-    origin = ""
-    show_sender = 0
-    subject = ""
-    earliest_delivery = 0
-    expire_after = 0
-    deliver_latest = 0
-    charged_party = ""
-    message_class = ""
-    content_class = ""
-    drm = 0
-    content_adaptation = 0
-    can_redistribute = 0
-    parts = []
+    id = None
+    template = None
+    provider_ref = ""    # X-MMS-Message-ID if carrier initiated
+    last_tran_id = None  # last X-MMS-Transaction-ID set by carrier
+    ack_at_addr = ""
+    direction = 0
+    gateway = ""
+    gateway_id = ""
+    destination = set()
+    cc = set()
+    bcc = set()
+    linked_id = ""
+    priority = ""
+    handling_app = ""
+    reply_to_app = ""
+    app_info = ""
+    events_url = ""
+    ack_requested = False
+    dr_requested = False
+    rr_requested = False
+    created_ts = 0
+    processed_ts = 0
 
 
-    def __init__(self, msgid=None):
-        if msgid:
-            self.load(msgid)
-        else:
-            self.message_id = str(uuid.uuid4()).replace("-", "")
+    def __init__(self, message_id=None, template_id=None):
+        if message_id is None:
+            self.id = str(uuid.uuid4()).replace("-", "")
+            self.last_tran_id = str(uuid.uuid4()).replace("-", "")
+            self.created_ts = int(time.time())
+            self.template = models.template.MMSMessageTemplate(template_id)
             self.save()
-            rdb.expireat('mmsmsg-' + self.message_id, int(time.time()) + MMS_TTL)
+            rdb.expireat('mms-' + self.id, int(time.time()) + MMSTX_TTL)
+        else:
+            self.load(message_id)
+
 
     def save(self):
-    # save to storage
-        rdb.hmset('mmsmsg-' + self.message_id, {
-            'origin': self.origin,
-            'show_sender': self.show_sender,
-            'subject': self.subject,
-            'earliest_delivery': self.earliest_delivery,
-            'expire_after': self.expire_after,
-            'deliver_latest': self.deliver_latest,
-            'charged_party': self.charged_party,
-            'message_class': self.message_class,
-            'content_class': self.content_class,
-            'drm': self.drm,
-            'content_adaptation': self.content_adaptation,
-            'can_redistribute': self.can_redistribute,
-            'parts': ",".join(self.parts),
+        rdb.hmset('mms-' + self.id, {
+            'template_id': self.template.id,
+            'provider_ref': self.provider_ref,
+            'last_tran_id': self.last_tran_id,
+            'ack_at_addr': self.ack_at_addr,
+            'direction': self.direction,
+            'gateway': self.gateway,
+            'gateway_id': self.gateway_id,
+            'destination': ",".join(self.destination),
+            'cc': ",".join(self.cc),
+            'bcc': ",".join(self.bcc),
+            'linked_id': self.linked_id,
+            'priority': self.priority,
+            'handling_app': self.handling_app,
+            'reply_to_app': self.reply_to_app,
+            'app_info': self.app_info,
+            'events_url': self.events_url,
+            'ack_requested': 1 if self.ack_requested else 0,
+            'dr_requested': 1 if self.dr_requested else 0,
+            'rr_requested': 1 if self.rr_requested else 0,
+            'created_ts': self.created_ts,
+            'processed_ts': self.processed_ts,
         })
+
 
     def load(self, msgid):
-    # load from storage
-        msg = rdb.hgetall('mmsmsg-' + msgid)
-        if msg:
-            self.message_id = msgid
-            self.origin = msg.get('origin', "")
-            self.show_sender = msg.get('show_sender', -1)
-            self.subject = msg.get('subject', "")
-            self.earliest_delivery = msg.get('earliest_delivery', 0)
-            self.expire_after = msg.get('expire_after', 0)
-            self.deliver_latest = msg.get('deliver_latest', 0)
-            self.charged_party = msg.get('charged_party', "")
-            self.message_class = msg.get('message_class', "")
-            self.content_class = msg.get('content_class', "")
-            self.drm = msg.get('drm', -1)
-            self.content_adaptation = msg.get('content_adaptation', -1)
-            self.can_redistribute = msg.get('can_redistribute', -1)
-            self.parts = msg.get('parts', "").split(",")
+        md = rdb.hgetall("mms-" + msgid)
+        if md:
+            self.id = msgid
+            self.template = models.template.MMSMessageTemplate(md['template_id'])
+            self.provider_ref = md['provider_ref']
+            self.last_tran_id = md['last_tran_id']
+            self.ack_at_addr = md['ack_at_addr']
+            self.direction = md['direction']
+            self.gateway_id = md['gateway_id']
+            self.gateway = md['gateway']
+            l = md.get('destination', "")
+            self.destination = set(l.split(",")) if len(l) > 0 else set()
+            l = md.get('cc', "")
+            self.cc = set(l.split(",")) if len(l) > 0 else set()
+            l = md.get('bcc', "")
+            self.bcc = set(l.split(",")) if len(l) > 0 else set()
+            self.linked_id = md['linked_id']
+            self.priority = md['priority']
+            self.handling_app = md['handling_app']
+            self.reply_to_app = md['reply_to_app']
+            self.app_info = md['app_info']
+            self.events_url = md['events_url']
+            self.ack_requested = md['ack_requested'] == 1
+            self.dr_requested = md['dr_requested'] == 1
+            self.rr_requested = md['rr_requested'] == 1
+            self.created_ts = md['created_ts']
+            self.processed_ts = md['processed_ts']
 
-    def as_email(self):
-        return None
-
-    def as_httprq(self):
-        return None
 
     def as_dict(self):
-        ret = {
-            'message_id': self.message_id,
-            'content_class': self.content_class,
-            'origin': self.origin,
-            'subject': self.subject,
-            'parts': []
+        d = {
+            'id': self.id,
+            'provider_ref': self.provider_ref,
+            'last_tran_id': self.last_tran_id,
+            'ack_at_addr': self.ack_at_addr,
+            'direction': self.direction,
+            'gateway_id': self.gateway_id,
+            'gateway': self.gateway,
+            'destination': list(self.destination),
+            'cc': list(self.cc),
+            'bcc': list(self.bcc),
+            'linked_id': self.linked_id,
+            'priority': self.priority,
+            'handling_app': self.handling_app,
+            'reply_to_app': self.reply_to_app,
+            'app_info': self.app_info,
+            'events_url': self.events_url,
+            'ack_requested': self.ack_requested,
+            'dr_requested': self.dr_requested,
+            'rr_requested': self.rr_requested,
+            'created_ts': self.created_ts,
+            'processed_ts': self.processed_ts,
         }
-        for pid in self.parts:
-            if pid:
-                p = MMSMessagePart(pid)
-                ret['parts'].append(p.as_dict())
-        return ret
+        if self.template:
+            d['template'] = self.template.as_dict()
+            all_parts = []
+            for pid in self.template.parts:
+                part = models.template.MMSMessagePart(pid)
+                if part:
+                    all_parts.append(part.as_dict())
+            d['template']['parts'] = all_parts
+        d['events'] = []
+        ev_keys = rdb.lrange('mms-' + self.id + '-events', 0, -1)
+        for ev_key in ev_keys:
+            ev = rdb.hgetall(ev_key)
+            if ev:
+                d['events'].append(ev)
 
-    def add_part_from_mime(self, ep, url_prefix=None):
-        p = MMSMessagePart()
-        p.content_name = ep['Content-Id'] or p.part_id
-        p.content_type = ep.get_content_type()
-        if p.content_type not in ACCEPTED_CONTENT_TYPES:
-            return '406', "Content type '{}' not accepted".format(ep['Content-Type'])
-        fn = ep.get_filename("") or (p.content_name + ACCEPTED_CONTENT_TYPES[p.content_type])
-        if p.content_type == "application/smil" or p.content_type.startswith("text/"):
-            p.content = ep.get_payload(decode=True)
-        elif p.content_type.startswith("image/") or p.content_type.startswith("audio/"):
-            try:
-                fh = open(repo(TMP_MEDIA_DIR, self.message_id + "-" + fn), "wb")
-                fh.write(ep.get_payload(decode=True))
-                fh.close()
-            except Exception as e:
-                return '500', "Failed saving file {} in {}: {}".format(fn, TMP_MEDIA_DIR, e)
-            p.content_url = (url_prefix or (API_URL + URL_ROOT)) + self.message_id + "-" + fn
-        else:
-            return '415', "Content type '{}' not handled".format(p.content_type)
-        p.save()
-        self.parts.append(p.part_id)
-        return '200', ""
+        return d
 
 
-class MMSMessagePart(object):
+    def nq(self, gateway):
+        self.gateway = gateway
+        q_tx = rq.Queue("QTX-" + (gateway or DEFAULT_GATEWAY), connection=rdbq)
+        q_tx.enqueue_call(
+            func='models.gateway.send_mms', args=( self.id, ), 
+            job_id=self.id,
+            meta={ 'retries': MAX_TX_RETRIES },
+            ttl=30
+        )
+        log.info("[{}] transmission {} queued for processing".format(gateway, self.id))
+        self.set_state([], "SCHEDULED")
 
-    part_id = None
-    content_url = ""
-    content = None
-    content_name = ""
-    content_type = ""
 
-    def __init__(self, pid=None):
-        if pid:
-            self.load(pid)
-        else:
-            self.part_id = str(uuid.uuid4()).replace("-", "")
-            self.save()
-            rdb.expireat('mmspart-' + self.part_id, int(time.time()) + MMS_TTL)
+    def set_state(self, dest, state, err="", desc="", gwid="", provider_id=None, extra=None):
 
-    def save(self):
-    # save to storage
-        rdb.hmset('mmspart-' + self.part_id, {
-            'content_url': self.content_url,
-            'content_name': self.content_name,
-            'content_type': self.content_type,
-        })
-        if self.content is not None:
-            rdb.hset('mmspart-' + self.part_id, 'content', self.content)
-        else:
-            rdb.hdel('mmspart-' + self.part_id, 'content')
-
-    def load(self, pid):
-    # load from storage
-        p = rdb.hgetall('mmspart-' + pid)
-        if p:
-            self.part_id = pid
-            self.content_url = p.get('content_url', "")
-            self.content = p.get('content')
-            self.content_name = p.get('content_name', "")
-            self.content_type = p.get('content_type', "")
-
-    def as_email_part(self):
-        return None
-
-    def as_httprq_part(self):
-        return None
-
-    def as_dict(self):
-        return {
-            'part_id': self.part_id,
-            'content_url': self.content_url,
-            'content': self.content,
-            'content_name': self.content_name,
-            'content_type': self.content_type,
+        s = {
+            'state': state,
+            'code': err,
+            'description': desc,
+            'gateway': gwid,
+            'timestamp': int(time.time())
         }
+        if provider_id is not None:
+            s['provider_id'] = provider_id
+        if extra:
+            s.update(extra)
+
+        if len(dest):
+            for d in dest:
+                k = "mms-stat-" + self.id + "-" + d
+                rdb.hmset(k, s)
+                rdb.expireat(k, int(time.time()) + MMSTX_TTL)
+        else:
+            k = "mmstx-stat-" + self.id
+            rdb.hmset(k, s)
+            rdb.expireat(k, int(time.time()) + MMSTX_TTL)
+        rdb.rpush('mms-' + self.id + '-events', k)
+        rdb.expireat('mms-' + self.id + '-events', int(time.time()) + MMSTX_TTL)
+
+        # callback to the app if necessary
+        s['transaction_id'] = self.id
+        if len(dest):
+            s['destinations'] = dest
+        q_cb = rq.Queue("QEV", connection=rdbq)
+#        url_list = self.events_url.split(",") + gw.events_url.split(",")
+#        for url in url_list:
+#            q_cb.enqueue_call("backend.util.cb_post", ( url, json.dumps(s), ))
+
 
