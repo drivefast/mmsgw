@@ -1,5 +1,6 @@
 import uuid
 import time
+import json
 import bottle
 import rq
 import requests
@@ -14,20 +15,21 @@ import models.template
 import models.gateway
 
 
-@bottle.get(URL_ROOT + "mt/<msgid>")
-@bottle.get(URL_ROOT + "mo/<msgid>")
+@bottle.get(URL_ROOT + "mms/outbound/<msgid>")
+@bottle.get(URL_ROOT + "mms/inbound/<msgid>")
 def get_mms(msgid):
     m = MMSMessage(msgid)
     return m.as_dict() if m else \
         json_error(404, "Not found", "MMS message transaction {} not found".format(msgid))
 
 
-@bottle.post(URL_ROOT + "mt/<template_id>")
-def enqueue_mms_mt(template_id):
+@bottle.post(URL_ROOT + "mms/outbound/<template_id>")
+def enqueue_outbound_mms(template_id):
     mj = bottle.request.json
     m = MMSMessage(template_id=template_id)
 
     m.direction = -1
+    m.origin = mj.get("origin", m.template.origin)
     m.destination = makeset(mj.get("destination"))
     m.cc = makeset(mj.get('cc'))
     m.bcc = makeset(mj.get('bcc'))
@@ -45,23 +47,23 @@ def enqueue_mms_mt(template_id):
     return m.as_dict()
 
 
-@bottle.post(URL_ROOT + "mo/<event:re:ack|dr|rr>/<rxid>")
-def enqueue_mms_mo_event(event, rxid):
+@bottle.post(URL_ROOT + "mms/inbound/<event:re:ack|dr|rr>/<rxid>")
+def enqueue_inbound_mms_event(event, rxid):
     # expected format: dictionary with the following keys
     #    gateway: the gateway that this message needs to be sent thru
-    #    mo_from: the phone number that sent the original MO
-    #    transaction: our own transaction ID
-    #    provider_ref: provider's original id (X-Mms-Message-Id)
+    #    message: our own message ID
+    #    provider_ref: provider's original message id (X-Mms-Message-Id)
     #    status: canonical status id
     #    description: verbose description of the status
     #    applies_to: phone number(s) this status applies to; missing means applies to all
-    ev = bottle.request.json()
+    ev = bottle.request.json
+    log.info(">>>> ordered {} event for incoming MMS {}: {}".format(event, rxid, ev))
     if \
         ev.get('gateway') is None or \
-        ev.get('transaction') is None or \
+        ev.get('message') is None or \
         ev.get('provider_ref') is None or \
         ev.get('status') is None or \
-        (event != "ack" and ev.get('mo_from') is None) or \
+        (event != "ack" and ev.get('event_for') is None) or \
         (event != "ack" and ev.get('applies_to') is None) \
     :
         json_error(400, "Bad Request", "Missing required parameter")
@@ -70,24 +72,24 @@ def enqueue_mms_mo_event(event, rxid):
 
     q_ev = rq.Queue("QEV-" + ev['gateway'], connection=rdbq)
     q_ev.enqueue_call(
-        func='models.gateway.mmsmo_event', 
+        func='models.gateway.inbound_mms_event', 
         args=( 
-            ev['transaction'], event, ev['provider_ref'],
-            ev['provider_ref'], ev['status'], ev['description'], 
-            ev.get('mo_from'), list(ev.get('applies_to', "")), 
+            ev['message'], event, ev['provider_ref'],
+            ev['status'], ev['description'], 
+            ev.get('event_for'), list(ev.get('applies_to', "")), 
         ),
-        meta={ 'retries': MAX_EV_RETRIES }
+        meta={ 'retries': MAX_TX_RETRIES }
     )
 
 
-# handle MM7 requests received from carrier side
-@bottle.post(URL_ROOT + "mo/<gw_group>")
-def mm7_incoming(gw_group):
+# handle MM7 requests received from carrier side, could be MOs or events for MTs
+@bottle.post(URL_ROOT + "mms/inbound/<gw_group>")
+def mm7_inbound(gw_group):
     raw_content = bottle.request.body.read()
-    log.info("{} request received, {} bytes".format(gw_group, bottle.request.headers['Content-Length']))
+    log.info(">>>> {} request received, {} bytes".format(gw_group, bottle.request.headers['Content-Length']))
     log.debug("raw content: {}...".format(raw_content[:4096]))
     if len(raw_content) > 4096:
-        log.debug("... {}".format(raw_content[-256:]))
+        log.debug(">>>> ... {}".format(raw_content[-256:]))
 
     bottle.response.content_type = "text/xml"
     mime_headers = "Mime-Version: 1.0\nContent-Type: " + bottle.request.headers['Content-Type']
@@ -163,6 +165,7 @@ class MMSMessage(object):
     direction = 0
     gateway = ""
     gateway_id = ""
+    origin = ""
     destination = set()
     cc = set()
     bcc = set()
@@ -186,7 +189,7 @@ class MMSMessage(object):
             self.created_ts = int(time.time())
             self.template = models.template.MMSMessageTemplate(template_id)
             self.save()
-            rdb.expireat('mms-' + self.id, int(time.time()) + MMSTX_TTL)
+            rdb.expireat('mms-' + self.id, int(time.time()) + MMS_TTL)
         else:
             self.load(message_id)
 
@@ -200,6 +203,7 @@ class MMSMessage(object):
             'direction': self.direction,
             'gateway': self.gateway,
             'gateway_id': self.gateway_id,
+            'origin': self.origin,
             'destination': ",".join(self.destination),
             'cc': ",".join(self.cc),
             'bcc': ",".join(self.bcc),
@@ -228,6 +232,7 @@ class MMSMessage(object):
             self.direction = md['direction']
             self.gateway_id = md['gateway_id']
             self.gateway = md['gateway']
+            self.origin = md['origin']
             l = md.get('destination', "")
             self.destination = set(l.split(",")) if len(l) > 0 else set()
             l = md.get('cc', "")
@@ -256,6 +261,7 @@ class MMSMessage(object):
             'direction': self.direction,
             'gateway_id': self.gateway_id,
             'gateway': self.gateway,
+            'origin': self.origin,
             'destination': list(self.destination),
             'cc': list(self.cc),
             'bcc': list(self.bcc),
@@ -280,11 +286,9 @@ class MMSMessage(object):
                     all_parts.append(part.as_dict())
             d['template']['parts'] = all_parts
         d['events'] = []
-        ev_keys = rdb.lrange('mms-' + self.id + '-events', 0, -1)
-        for ev_key in ev_keys:
-            ev = rdb.hgetall(ev_key)
-            if ev:
-                d['events'].append(ev)
+        events = rdb.lrange('mmsev-' + self.id, 0, -1)
+        for ev_json in events:
+            d['events'].append(json.loads(ev_json))
 
         return d
 
@@ -302,8 +306,9 @@ class MMSMessage(object):
         self.set_state([], "SCHEDULED")
 
 
-    def set_state(self, dest, state, err="", desc="", gwid="", provider_id=None, extra=None):
+    def set_state(self, dest, state, err="", desc="", gwid="", extra=None):
 
+        log.debug(">>>> gateway {} posting event {} for {}".format(gwid, state, self.id))
         s = {
             'state': state,
             'code': err,
@@ -311,27 +316,18 @@ class MMSMessage(object):
             'gateway': gwid,
             'timestamp': int(time.time())
         }
-        if provider_id is not None:
-            s['provider_id'] = provider_id
         if extra:
-            s.update(extra)
+            pass
 
-        if len(dest):
-            for d in dest:
-                k = "mms-stat-" + self.id + "-" + d
-                rdb.hmset(k, s)
-                rdb.expireat(k, int(time.time()) + MMSTX_TTL)
-        else:
-            k = "mmstx-stat-" + self.id
-            rdb.hmset(k, s)
-            rdb.expireat(k, int(time.time()) + MMSTX_TTL)
-        rdb.rpush('mms-' + self.id + '-events', k)
-        rdb.expireat('mms-' + self.id + '-events', int(time.time()) + MMSTX_TTL)
+        s['destinations'] = dest if isinstance(dest, list) else [ dest ]
+        if len(s['destinations']) == 0:
+            s['destinations'] = [ "*" ]
+        for d in s['destinations']:
+            rdb.rpush("mmsev-" + self.id, json.dumps(s))
+            rdb.expireat("mmsev-" + self.id, int(time.time()) + MMS_TTL)
 
         # callback to the app if necessary
-        s['transaction_id'] = self.id
-        if len(dest):
-            s['destinations'] = dest
+        s['message'] = self.id
         q_cb = rq.Queue("QEV", connection=rdbq)
 #        url_list = self.events_url.split(",") + gw.events_url.split(",")
 #        for url in url_list:

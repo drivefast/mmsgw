@@ -192,7 +192,7 @@ class MMSMessageTemplate(object):
         else:
             self.id = str(uuid.uuid4()).replace("-", "")
             self.save()
-            rdb.expireat('mmstpl-' + self.id, int(time.time()) + MMS_TTL)
+            rdb.expireat('mmstpl-' + self.id, int(time.time()) + MMS_TEMPLATE_TTL)
 
     def save(self):
     # save to storage
@@ -253,7 +253,7 @@ class MMSMessageTemplate(object):
 
     def add_part_from_mime(self, ep, url_prefix=None):
         p = MMSMessagePart()
-        p.content_name = ep['Content-Id'] or p.part_id
+        p.content_name = ep['Content-Id'] if "Content-Id" in ep else p.id
         p.content_type = ep.get_content_type()
         if p.content_type not in ACCEPTED_CONTENT_TYPES:
             return '406', "Content type '{}' not accepted".format(ep['Content-Type'])
@@ -289,7 +289,7 @@ class MMSMessagePart(object):
         else:
             self.part_id = str(uuid.uuid4()).replace("-", "")
             self.save()
-            rdb.expireat('mmspart-' + self.part_id, int(time.time()) + MMS_TTL)
+            rdb.expireat('mmspart-' + self.part_id, int(time.time()) + MMS_TEMPLATE_TTL)
 
     def save(self):
     # save to storage

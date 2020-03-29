@@ -39,13 +39,13 @@ TMP_MEDIA_DIR = cfg['general'].get("media_dir", "/tmp/media/")
 if not TMP_MEDIA_DIR.endswith("/"):
     TMP_MEDIA_DIR += "/"
 
-MMS_TTL = int(cfg['general'].get('mms_ttl', 3600))
-MMSTX_TTL = int(cfg['general'].get('mmstx_ttl', 3600))
+MMS_TTL = int(cfg['general'].get('mms_ttl', 4 * 3600))
+MMS_TEMPLATE_TTL = int(cfg['general'].get('mms_template_ttl', 24 * 3600))
 
 DEFAULT_GATEWAY = cfg['general'].get('default_gateway', "provider")
 GW_HEARTBEAT_TIMER = int(cfg['general'].get('gateway_heartbeat_interval', 30))
 GW_HEARTBEATS = int(cfg['general'].get('gateway_max_missed_heartbeats', 10))
-MAX_TX_RETRIES = int(cfg['general'].get('max_tx_retries', 5))
+MAX_TX_RETRIES = int(cfg['general'].get('max_transmit_retries', 5))
 
 STORAGE_CONN = cfg['message_storage']
 QUEUE_CONN = cfg['queue_storage']

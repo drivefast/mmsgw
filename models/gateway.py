@@ -29,26 +29,6 @@ import models.message
 import models.template
 
 
-MM4_MEDIA_ERROR_MAP = {
-    '200': "Ok",
-    '404': "Error-message-not-found",
-    '406': "Error-content-not-accepted",
-    '415': "Error-unsupported-message",
-    '500': "Error-unspecified",
-}
-MM4_DR_STATUS_MAP = {
-    '408': "Expired",
-    '200': "Retrieved",
-    '406': "Rejected",
-    '410': "Deferred",
-    '500': "Indeterminate",
-    '202': "Forwarded",
-    '404': "Unrecognised",
-}
-MM4_RR_STATUS_MAP = {
-    "200": "Read",
-    "406": "Deleted without being read",
-}
 
 MM7_ROOT_NS = "soapenv"
 MM7_STATUS = {
@@ -120,7 +100,7 @@ def send_mms(txid):
             if m:
                 log.debug("[{}] {} prepared for transmission".format(gw.gwid, txid))
                 if gw.protocol == "MM4":
-                    src_addr = gw.origin_prefix + tx.template.origin + gw.origin_suffix
+                    src_addr = gw.origin_prefix + tx.origin + gw.origin_suffix
                     if "@" not in src_addr:
                         src_addr += "@" + gw.local_domain
                     dest_addr = list(map(lambda a: 
@@ -141,7 +121,7 @@ def send_mms(txid):
             log.info("[{}] {} gateway error: {}".format(gw.gwid, txid, traceback.format_exc()))
             ret_code, ret_desc = "2", "internal error: {}".format(ex) 
 
-        tx.set_state([], "FAILED", ret_code.zfill(4), ret_desc, gw.gwid, ret_desc)
+        tx.set_state([], "FAILED", ret_code, ret_desc, gw.gwid)
         if len(ret_code) > 1:
             # only reschedule for external, environmental errors
             reschedule(this_job, gw.q_tx)
@@ -163,13 +143,13 @@ def mm4rx(fn):
             if e_type is None:
                 log.info("[{}] {} has no MM4 message type".format(gw.gwid, jid))
             elif e_type.lower() == "mm4_forward.req":
-                res = gw.process_mo(e)
+                res = gw.process_inbound_mms(e)
             elif e_type.lower() == "mm4_forward.res":
-                res = gw.process_mt_ack(e)
+                res = gw.process_ack_for_outbound(e)
             elif e_type.lower() == "mm4_delivery_report.req":
-                res = gw.process_mt_dr(e)
+                res = gw.process_dr_for_outbound(e)
             elif e_type.lower() == "mm4_read_reply_report.req":
-                res = gw.process_mt_rr(e)
+                res = gw.process_rr_for_outbound(e)
             else:
                 log.info("[{}] {} unhandled MM4 message type '{}'".format(gw.gwid, jid, e_type))
     except IOError as ioe:
@@ -184,23 +164,14 @@ def mm4rx(fn):
         pass
 
 
-def mmsmo_event(rxid, ev, ref, ev_status, ev_desc, orig_from_num, applies_to_num=[]):
+def inbound_mms_event(rxid, ev, ref, ev_status, ev_desc, ev_target, applies_to_num=[]):
     gw = THIS_GW
     if ev == 'ack':
-        s = MM4_MEDIA_ERROR_MAP.get(ev_status, "") if gw.protocol == "mm4" \
-            else MM7_MEDIA_ERROR_MAP.het(ev_status, "")
-        gw.send_mo_ack(rxid, s, ev_desc, applies_to_num)
+        gw.send_ack_for_inbound(rxid, ev_status, ev_desc, applies_to_num)
     elif ev == 'dr':
-        s = MM4_DR_STATUS_MAP.get(ev_status, "") if gw.protocol == "mm4" \
-            else MM7_DR_STATUS_MAP.get(ev_status, "")
-        gw.send_mo_dr(applies_to_num, orig_from_num, rxid, ref, s, ev_desc)
+        gw.send_dr_for_inbound(applies_to_num, ev_target, rxid, ref, ev_status, ev_desc)
     elif ev == 'rr':
-        s = MM4_RR_STATUS_MAP.get(ev_status, "") if gw.protocol == "mm4" \
-            else MM7_RR_STATUS_MAP.get(ev_status, "")
-        gw.send_mo_rr(applies_to_num, orig_from_num, rxid, ref, s, ev_desc)
-
-
-
+        gw.send_rr_for_inbound(applies_to_num, ev_target, rxid, ref, ev_status, ev_desc)
 
 
 def process_event(txid, meta):
@@ -273,7 +244,7 @@ class MMSGateway(object):
     this_domain = None   # emails coming from any of these domains will be dispatched to this gateway
     this_host = None
     mime_parts_url_prefix = ""
-    mo_received_url = ""
+    mms_received_url = ""
 
     # addressing
     dest_prefix = ""
@@ -314,7 +285,7 @@ class MMSGateway(object):
             self.auth = ( cfg['outbound']['username'], cfg['outbound']['password'] )
 
         self.mime_parts_url_prefix = cfg['inbound'].get('mime_parts_url_prefix', "")
-        self.mo_received_url = cfg['inbound'].get('mo_received_url', "")
+        self.mms_received_url = cfg['inbound'].get('mms_received_url', "")
 
         self.dest_prefix = cfg['addressing'].get('dest_prefix', "")
         self.dest_suffix = cfg['addressing'].get('dest_suffix', "")
@@ -332,6 +303,28 @@ class MMSGateway(object):
 
 
 class MM4Gateway(MMSGateway):
+
+    MEDIA_ERROR_MAP = {
+        '200': "Ok",
+        '400': "Error-message-format-corrupt",
+        '404': "Error-message-not-found",
+        '406': "Error-content-not-accepted",
+        '415': "Error-unsupported-message",
+        '500': "Error-unspecified",
+    }
+    DR_STATUS_MAP = {
+        '200': "Retrieved",
+        '202': "Forwarded",
+        '404': "Unrecognised",
+        '406': "Rejected",
+        '408': "Expired",
+        '410': "Deferred",
+        '500': "Indeterminate",
+    }
+    RR_STATUS_MAP = {
+        '200': "Read",
+        '406': "Deleted without being read",
+    }
 
     connection = None
     remote_domain = None
@@ -574,7 +567,7 @@ class MM4Gateway(MMSGateway):
             list(map(lambda e: self._phone_num_from_address(e), cdl.split(",")))
 
 
-    def process_mo(self, m):
+    def process_inbound_mms(self, m):
         if "X-Mms-Message-Id" in m:
             tpl = models.template.MMSMessageTemplate()
             rx = models.message.MMSMessage()
@@ -582,14 +575,14 @@ class MM4Gateway(MMSGateway):
             rx.last_tran_id = m['X-Mms-Transaction-Id'].replace("\"", "")
             rx.ack_at_addr = m['X-Mms-Originator-System'].replace("\"", "")
             rx.direction = 1
-            rx.message = tpl
+            rx.template = tpl
             rx.gateway_id = self.gwid
             rx.gateway = self.group
         else:
             log.warning("[{}] MM4 message missing X-Mms-Message-Id header".format(self.gwid))
             return
         log.debug("[{}] {} creating MO from {} to {}".format(self.gwid, rx.id, m['From'], m['To']))
-        tpl.origin = self._phone_num_from_address(m['From'])
+        rx.origin = tpl.origin = self._phone_num_from_address(m['From'])
         rx.destination = set(self._parse_address_list(m['To']))
         rx.cc = set(self._parse_address_list(m['Cc']))
         rx.bcc = set(self._parse_address_list(m['Bcc']))
@@ -641,8 +634,7 @@ class MM4Gateway(MMSGateway):
 
         tpl.save()
         rx.save()
-        for n in all_recipients:
-            rx.set_state(n, "FORWARDED", "", "", rx.id, rx.provider_ref, {})
+        rx.set_state([], "FORWARDED", "", "", self.gwid, {})
         log.debug("[{}] {} prepared message {} and reception record; will parse content"
             .format(self.gwid, rx.id, tpl.id)
         )
@@ -658,15 +650,15 @@ class MM4Gateway(MMSGateway):
                 mime_parts = [ m ]
             for mp in mime_parts:
                 if mp.is_multipart():
-                    ret_code = "Error-message-format-corrupt"
+                    ret_code = '400'
                     ret_desc = "Unexpected multipart in content"
                 else:
-                    rc, ret_desc = msg.add_part_from_mime(mp, self.mime_parts_url_prefix)
-                    ret_code = MM4_MEDIA_ERROR_MAP[rc]
-                if ret_code == "Ok":
-                    p = models.template.MMSMessagePart(msg.parts[-1])
-                    log.info("[{}] {} Processed {} part stored at {}".format(
-                        self.gwid, rx.id, p.content_type, p.content_url
+                    ret_code, ret_desc = tpl.add_part_from_mime(mp, self.mime_parts_url_prefix)
+                if ret_code == '200':
+                    p = models.template.MMSMessagePart(tpl.parts[-1])
+                    log.info("[{}] {} Processed {} part '{}' stored as {}".format(
+                        self.gwid, rx.id, p.content_type, p.content_name, 
+                        p.content_url or "object property"
                     ))
                 else:
                     log.info("[{}] {} Not processed message part: {} {}".format(
@@ -675,12 +667,12 @@ class MM4Gateway(MMSGateway):
             tpl.save()
         except email.errors.MessageError as ee:
             log.info("[{}] {} Message content processing error: {}".format(self.gwid, rx.id, ee))
-            ret_code = "Error-message-format-corrupt"
+            ret_code = '400'
             ret_desc = "Error processing message MIME parts"
         except Exception as ex:
             log.info("[{}] {} Message content processing failure: {}".format(self.gwid, rx.id, ex))
             log.debug(traceback.format_exc())
-            ret_code = "Error-unspecified"
+            ret_code = '500'
             ret_desc = "Error processing message MIME parts"
 
         if 'X-Mms-Ack-Request' in m and m['X-Mms-Ack-Request'].lower() == "yes":
@@ -688,42 +680,38 @@ class MM4Gateway(MMSGateway):
             if ret_code != "Ok" or self.auto_ack:
                 # if we have an error already, or the auto-ack is set, we send the MM4_forward.RES 
                 # right away; otherwise we count on the handling app to schedule the ack
-                self.send_mo_ack(rx.last_tran_id, ret_code, ret_desc)
+                self.send_inbound_ack(rx.id, ret_code, ret_desc)
             else:
                 rx.ack_requested = True
 
-        if \
-            ret_code == "Ok" and \
-            m['X-Mms-Delivery-Report'] and \
-            m['X-Mms-Delivery-Report'].lower() == "yes" \
-        :
+        if ret_code == "Ok" and str(m['X-Mms-Delivery-Report']).lower() == "yes":
             # sender requested to send them DLR
             if self.auto_dr:
-                for rcpt in all_recipients:
-                    self.send_mo_dr(rcpt, msg.origin, rx.id, 
-                        "500", "Downstream provides no delivery information"
-                    )
+                self.send_inbound_dr(all_recipients, rx.origin, rx.id, 
+                    "200", "Assume retrieved; downstream provides no delivery information"
+                )
             else:
                 rx.dr_requested = True
 
-        rx.rr_requested = m['X-Mms-Read-Reply'] and (m['X-Mms-Read-Reply'].lower() == "yes")
+        rx.rr_requested = m['X-Mms-Read-Reply'] is not None and (m['X-Mms-Read-Reply'].lower() == "yes")
 
         rx.save()
 
-        if self.mo_received_url:
+        if self.mms_received_url:
             # let downstream application know that we received an MO
             qmo = rq.Queue('QMO', connection=rdbq)
-            j = qmo.enqueue_call("backend.util.cb_post", ( self.mo_received_url, json.dumps(rx.as_dict()), ))
+            j = qmo.enqueue_call("backend.util.cb_post", ( self.mms_received_url, json.dumps(rx.as_dict()), ))
             log.debug("[{}] {} posted MO to {} as job {}"
-                .format(self.gwid, rx.id, self.mo_received_url, j.id)
+                .format(self.gwid, rx.id, self.mms_received_url, j.id)
             )
 
 
-    def send_mo_ack(self, rxid, status, status_desc="", reporting_phone_num=[]):
+    def send_ack_for_inbound(self, rxid, status, status_desc="", reporting_phone_num=[]):
         rx = models.message.MMSMessage(rxid)
         if rx:
             log.debug("[{}] {} Sending MO receipt confirmation".format(self.gwid, rxid))
-            e = MIMEText("")
+            stat = self.MEDIA_ERROR_MAP.get(status, "Error-unspecified")
+            e = MIMEText(status_desc)
             e['Date'] = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
             e['From'] = self.originator_addr
             e['Sender'] = self.originator_addr
@@ -732,18 +720,15 @@ class MM4Gateway(MMSGateway):
             e.add_header('X-Mms-Message-Type', "MM4_forward.RES")
             e.add_header('X-Mms-Transaction-ID', rx.last_tran_id)
             e.add_header('X-Mms-Message-ID', rx.provider_ref)
-            e.add_header('X-Mms-Request-Status-Code', status)
+            e.add_header('X-Mms-Request-Status-Code', stat)
             e.add_header('X-Mms-Status-Text', status_desc)
             if len(reporting_phone_num):
                 e.add_header('X-Mms-Request-Recipients', 
                     ".".join(list(map(lambda a: self.dest_prefix + a + self.dest_suffix, reporting_phone_num)))
-                ) 
-            c, d = self.send_to_mmsc(e, rxid, self.originator_addr, send_to)
+                )
+            c, d = self.send_to_mmsc(e, rxid, self.originator_addr, rx.ack_at_addr)
             if c is None:
-                for rcpt in all_recipients:
-                    rx.set_state(rcpt, "ACKNOWLEDGED", 
-                        ret_code, ret_desc, rxid, rx.provider_ref, {}
-                    )
+                rx.set_state(reporting_phone_num, "ACKNOWLEDGED", status, status_desc, self.gwid)
             else:
                 log.warning("[{}] {} Failed to reply with MO receipt ack onfirmation: {}"
                     .format(self.gwid, rxid, d)
@@ -752,11 +737,12 @@ class MM4Gateway(MMSGateway):
             log.warning("[{}] {} MO transaction not found for receipt confirmation".format(self.gwid, rxid))
 
 
-    def send_mo_dr(self, reporting_phone_num, msg_from_num, rxid, ref, status, status_desc=""):
+    def send_dr_for_inbound(self, reporting_phone_num, msg_from_num, rxid, ref, status, status_desc=""):
         log.debug("[{}] {} Sending DLR for MO {} -> {} with status {} {} {}"
             .format(self.gwid, rxid, msg_from_num, reporting_phone_num, status, status_desc, status_ext)
         )
-        e = MIMEText("")
+        stat = self.DR_STATUS_MAP.get(status, "Indeterminate")
+        e = MIMEText(status_desc)
         e['From'] = self.origin_prefix + reporting_phone_num + self.origin_suffix
         e['Sender'] = self.originator_addr
         e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
@@ -764,8 +750,8 @@ class MM4Gateway(MMSGateway):
         e.add_header('X-Mms-Message-ID', ref)
         e.add_header('X-Mms-Ack-Request', "No")
         e.add_header('X-Mms-Forward-To-Originator-UA', "Yes")
-        e.add_header('X-Mms-MM-Status-Code', MM4_DR_STATUS_MAP.get(status, "Indeterminate"))
-#        if MM4_DR_STATUS_MAP.get(status) == "Rejected" and rejected_by is not None:
+        e.add_header('X-Mms-MM-Status-Code', stat)
+#        if stat == "Rejected" and rejected_by is not None:
 #            e.add_header('X-Mms-MM-Status-Extension', 
 #                "Rejection-By-MMS-Recipient" if rejected_by.lower() == "user" else "Rejection-by-Other-RS"
 #            )
@@ -784,26 +770,28 @@ class MM4Gateway(MMSGateway):
             e['To'] = self.dest_prefix + rcpt + self.dest_suffix
             c, d = self.send_to_mmsc(e, rxid, self.originator_addr, e['To'])
             if c is not None:
-                log.warning("[{}] {} Failed to reply with DLR for MO: {}".format(self.gwid, rxid, d))
+                log.warning("[{}] {} Failed to reply with DR for MO: {}".format(self.gwid, rxid, d))
             else:
                 if rx:
-                    rx.set_state(rcpt, "DELIVERED", 
-                        MM4_DR_STATUS_MAP.get(status, "Indeterminate"), "", rxid, rxid, {}
-                    )
+                    rx.set_state(rcpt, "DELIVERED", status, status_desc, self.gwid, {})
 
 
-    def send_mo_rr(self, reporting_phone_num, msg_from_num, rxid, ref, rstatus, rstatus_desc=""):
+    def send_rr_for_inbound(self, reporting_phone_num, msg_from_num, rxid, ref, rstatus, rstatus_desc=""):
         log.debug("[{}] {} Sending Read-Reply Report for MO {} -> {} with status {} {}"
             .format(self.gwid, rxid, msg_from_num, reporting_phone_num, rstatus, rstatus_desc)
         )
-        e = MIMEText("")
+        stat = self.RR_STATUS_MAP.get(rstatus)
+        if stat is None:
+            log.warning("[{}] {} Requested invalid read-report status {}".format(self.gwid, rxid, rstatus))
+            exit
+        e = MIMEText(rstatus)
         e['From'] = self.origin_prefix + reporting_phone_num + self.origin_suffix
         e['Sender'] = self.originator_addr
         e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
         e.add_header('X-Mms-Message-Type', "MM4_Read_reply_report.REQ")
         e.add_header('X-Mms-Message-ID', ref)
         e.add_header('X-Mms-Ack-Request', "No")
-        e.add_header('X-Mms-MM-Read-Status', MM4_RR_STATUS_MAP[rstatus])
+        e.add_header('X-Mms-MM-Read-Status', stat)
         if rstatus_desc:
             e.add_header('X-Mms-Status-Text', rstatus_desc)
         rx = models.transaction.MMSTransaction(rxid)
@@ -822,27 +810,26 @@ class MM4Gateway(MMSGateway):
                 log.warning("[{}] {} Failed to reply with DLR for MO: {}".format(self.gwid, rxid, d))
             else:
                 if rx:
-                    rx.set_state(rcpt, "READ", MM4_RR_STATUS_MAP[rstatus], "", rxid, rxid, {})
+                    rx.set_state(rcpt, "READ", rstatus, rstatus_desc, self.gwid, {})
 
 
-    def process_mt_ack(self, em):
+    def process_ack_for_outbound(self, em):
         txid = em['X-Mms-Message-Id'].replace("\"", "")
         log.debug("[{}] {} MT ack: {}".format(self.gwid, txid, em.as_string()))
         tx = models.message.MMSMessage(txid)
         if tx is None:
             log.warning("[{}] transaction {} not found".format(self.gwid, txid))
             return None
-        destinations = self._parse_address_list(em['X-Mms-Request-Recipients']) or \
-            list(tx.destination | tx.cc | tx.bcc)
+        destinations = self._parse_address_list(em['X-Mms-Request-Recipients']) or [ "*" ]
         log.info("[{}] {} ACK response for {}: {} {}"
             .format(self.gwid, txid, destinations, em['X-Mms-Request-Status-Code'], em['X-Mms-Status-Text'])
         )
-        for d in destinations:
-            status = "ACKNOWLEDGED" if em['X-Mms-Request-Status-Code'].lower() == "ok" else "FAILED"
-            tx.set_state(d, status, em['X-Mms-Request-Status-Code'], em['X-Mms-Status-Text'], self.gwid)
+        status = "ACKNOWLEDGED" if em['X-Mms-Request-Status-Code'].lower() == "ok" else "FAILED"
+        code = self.MEDIA_ERROR_MAP.keys()[self.MEDIA_ERROR_MAP.values().index(em['X-Mms-Request-Status-Code'])]
+        tx.set_state(destinations, status, code, em['X-Mms-Request-Status-Code'] + " " + em['X-Mms-Status-Text'], self.gwid)
 
 
-    def process_mt_dr(self, em):
+    def process_dr_for_outbound(self, em):
         txid = em['X-Mms-Message-Id']
         tx = models.message.MMSMessage(txid)
         if tx is None:
@@ -855,9 +842,10 @@ class MM4Gateway(MMSGateway):
             "FORWARDED" if em['X-Mms-MM-Status-Code'].lower() in [ "deferred", "indeterminate", "forwarded" ] else \
             "FAILED" if em['X-Mms-MM-Status-Code'].lower() in [ "expired", "rejected", "unrecognised", "unrecognized" ] else \
             "UNDEFINED"
-        status_text = ((em['X-Mms-MM-Status-Extension'] or "") + " " + em['X-Mms-Status-Text']).strip()
+        code = self.DR_STATUS_MAP.keys()[self.DR_STATUS_MAP.values().index(em['X-Mms-MM-Status-Code'])]
+        status_text = em['X-Mms-MM-Status-Code'] + " " + em['X-Mms-Status-Text'] + " " + em['X-Mms-MM-Status-Extension']
         send_to_ua = em['X-Mms-Forward-To-Originator-UA'].lower() == "yes" if em['X-Mms-Forward-To-Originator-UA'] else False 
-        tx.set_state(d, status, em['X-Mms-MM-Status-Code'], status_text, self.gwid, em['X-Mms-Transaction-ID'],
+        tx.set_state(self._phone_num_from_address(em['To']), status, code, status_text, self.gwid,
             extra={
                 'send_to_UA': send_to_ua, 
                 'app': em['X-Mms-Applic-ID'], 
@@ -889,7 +877,7 @@ class MM4Gateway(MMSGateway):
                 log.warning("[{}] {} MT DLR confirmation failed: {}".format(self.gwid, txid, ret_desc))
 
 
-    def process_mt_rr(self, m):
+    def process_rr_for_outbound(self, m):
         pass
 
 
@@ -976,7 +964,7 @@ class MM7Gateway(MMSGateway):
         sender = ET.SubElement(submit_rq, "SenderIdentification")
         ET.SubElement(sender, "VASPID").text = self.vaspid
         ET.SubElement(sender, "VASID").text = self.vasid
-        self._add_address(ET.SubElement(sender, "SenderAddress"), tx.template.origin, 
+        self._add_address(ET.SubElement(sender, "SenderAddress"), tx.origin, 
             self.origin_prefix, self.origin_suffix
         )
 
@@ -1156,7 +1144,7 @@ class MM7Gateway(MMSGateway):
             else:
                  return rp.status_code, rp.reason
         except requests.RequestException as rqe:
-            log.info("[{}] {} http error: {}".format(gw.gwid, msgid, rqe))
+            log.info("[{}] {} http error: {}".format(self.gwid, msgid, rqe))
             return "50", "http error ({})".format(rqe)
 
 
