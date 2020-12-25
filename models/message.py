@@ -4,13 +4,15 @@ import json
 import bottle
 import rq
 import requests
+import email
+import xml.etree.cElementTree as ET
 
 import traceback
 
 from constants import *
 from backend.logger import log
 from backend.storage import rdb, rdbq
-from backend.util import makeset
+from backend.util import makeset, repo
 import models.template
 import models.gateway
 
@@ -19,7 +21,7 @@ import models.gateway
 @bottle.get(URL_ROOT + "mms/inbound/<msgid>")
 def get_mms(msgid):
     m = MMSMessage(msgid)
-    return m.as_dict() if m else \
+    return m.as_dict() if m.id else \
         json_error(404, "Not found", "MMS message transaction {} not found".format(msgid))
 
 
@@ -42,7 +44,7 @@ def enqueue_outbound_mms(template_id):
     m.priority = pri if pri in ACCEPTED_MESSAGE_PRIORITIES else "normal"
     m.report_url = mj.get('report_url', "")
 
-    m.nq(mj.get('gateway'))
+    m.nq(mj.get('gateway', DEFAULT_GATEWAY))
     m.save()
     return m.as_dict()
 
@@ -72,24 +74,24 @@ def enqueue_inbound_mms_event(event, rxid):
 
     q_ev = rq.Queue("QEV-" + ev['gateway'], connection=rdbq)
     q_ev.enqueue_call(
-        func='models.gateway.inbound_mms_event', 
+        func='models.gateway.send_event_for_inbound_mms', 
         args=( 
             ev['message'], event, ev['provider_ref'],
             ev['status'], ev['description'], 
             ev.get('event_for'), list(ev.get('applies_to', "")), 
         ),
-        meta={ 'retries': MAX_TX_RETRIES }
+        meta={ 'retries': MAX_GW_RETRIES }
     )
 
 
 # handle MM7 requests received from carrier side, could be MOs or events for MTs
-@bottle.post(URL_ROOT + "mms/inbound/<gw_group>")
-def mm7_inbound(gw_group):
+@bottle.post(URL_ROOT + "mms/inbound/<gw>")
+def mm7_inbound(gw):
     raw_content = bottle.request.body.read()
-    log.info(">>>> {} request received, {} bytes".format(gw_group, bottle.request.headers['Content-Length']))
-    log.debug("raw content: {}...".format(raw_content[:4096]))
+    log.info("[{}] request received, {} bytes".format(gw, bottle.request.headers['Content-Length']))
+    log.debug("[{}] >>>> raw content: {}...".format(gw, raw_content[:4096]))
     if len(raw_content) > 4096:
-        log.debug(">>>> ... {}".format(raw_content[-256:]))
+        log.debug("[{}] >>>> ... {}".format(gw, raw_content[-256:]))
 
     bottle.response.content_type = "text/xml"
     mime_headers = "Mime-Version: 1.0\nContent-Type: " + bottle.request.headers['Content-Type']
@@ -99,15 +101,15 @@ def mm7_inbound(gw_group):
     try:
         if m.is_multipart():
             parts = m.get_payload()
-            log.debug("handling as multipart, {} parts".format(len(parts)))
+            log.debug("[{}] handling as multipart, {} parts".format(gw, len(parts)))
             env_content = parts[0].get_payload(decode=True)
-            log.debug("SOAP envelope: {}".format(env_content))
+            log.debug("[{}] SOAP envelope: {}".format(gw, env_content))
             env = ET.fromstring(env_content)
         else:
-            log.debug("handling as single part")
+            log.debug("[{}] handling as single part".format(gw))
             env = ET.fromstring(m.get_payload(decode=True))
     except ET.ParseError as e:
-        log.warning("{} failed to xml-parse the SOAP envelope: {}".format(gw_group, e))
+        log.warning("[{}] Failed to xml-parse the SOAP envelope: {}".format(gw, e))
         return bottle.HTTPResponse(status=400, body="Failed to xml-parse the SOAP envelope")
 
     # get the transaction tag, treat it as unique ID of the incoming message
@@ -116,7 +118,7 @@ def mm7_inbound(gw_group):
     , MM7_NAMESPACE)
     if transaction_tag is None:
         s = "SOAP envelope of received request invalid, at least missing a transaction ID"
-        log.warning(s)
+        log.warning("[{}] {}".format(gw, s))
         return bottle.HTTPResponse(status=400, body=s)
     transaction_id = transaction_tag.text.strip()
 
@@ -125,33 +127,53 @@ def mm7_inbound(gw_group):
         "./{" + MM7_NAMESPACE['env'] + "}Body/{" + MM7_NAMESPACE['mm7'] + "}DeliverReq"
     , MM7_NAMESPACE)
     if mo_meta:
-        log.debug("Incoming message is an MO")
-        q_rx = rq.Queue("QRX-" + gw_group, connection=rdbq)
+        # create a shallow message to send back to the MMSC
+        rx = MMSMessage()
+        rx.last_tran_id = transaction_id
+        rx.direction = 1
+        log.debug("[{}] {} Incoming message {} is an MO".format(gw, rx.id, transaction_id))
+        rx.save()
+        # save raw content
+        fn = repo(MM7RX_DIR, rx.id + ".mm7")
+        with open(fn, "w") as fh:
+            fh.write(parts[1].as_string())
+        # schedule message for processing
+        q_rx = rq.Queue("QRX-" + gw, connection=rdbq)
         q_rx.enqueue_call(
-            func='models.gateway.process_mo', args=( transaction_id, mo_meta, parts[1], ), 
-            job_id=transaction_id,
-            meta={ 'retries': MAX_RX_RETRIES },
+            func='models.gateway.inbound', args=( rx.id + ".mm7", ET.tostring(mo_meta), ), 
+            job_id=rx.id,
+            meta={ 'retries': MAX_GW_RETRIES },
             ttl=30
         )
-        return MM7Gateway.build_response("DeliverRsp", transaction_id, msgid, '1000')
+        # send MM7 response
+        return models.gateway.MM7Gateway.build_response("DeliverRsp", transaction_id, rx.id, '1000')
 
     dr_meta = env.find(
         "./{" + MM7_NAMESPACE['env'] + "}Body/{" + MM7_NAMESPACE['mm7'] + "}DeliveryReportReq"
     , MM7_NAMESPACE)
     if dr_meta:
-        log.debug("Incoming message is a DLR")
-        q_ev = rq.Queue("QEV-" + gw_group, connection=rdbq)
-        q_ev.enqueue_call(
-            func='models.gateway.process_event', args=( transaction_id, dr_meta, ), 
+        log.debug("[{}] Incoming message is a DR".format(gw))
+        txid = dr_meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "")
+        if txid is None:
+            return models.gateway.MM7Gateway.build_response("DeliveryReportRsp", transaction_id, txid, '4004')
+        # find MT message
+        tx = MMSMessage(txid)
+        if tx.id is None:
+            return models.gateway.MM7Gateway.build_response("DeliveryReportRsp", transaction_id, txid, '2005')
+        # schedule DR for processing
+        q_rx = rq.Queue("QRX-" + gw, connection=rdbq)
+        q_rx.enqueue_call(
+            func='models.gateway.inbound', args=( "", ET.tostring(dr_meta), ), 
             job_id=transaction_id,
-            meta={ 'retries': MAX_EV_RETRIES },
+            meta={ 'retries': MAX_GW_RETRIES },
             ttl=30
         )
-        return MM7Gateway.build_response("DeliveryReportRsp", transaction_id, msgid, '1000')
+        # send MM7 response
+        return models.gateway.MM7Gateway.build_response("DeliveryReportRsp", transaction_id, txid, '1000')
 
     # handling for other MM7 requests (cancel, replace, read-reply, etc) go here 
 
-    log.warning("Unknown or unhandled message type")
+    log.warning("[{}] Unknown or unhandled message type".format(gw))
     return bottle.HTTPResponse(status=400, body="Unknown or unhandled message type")
 
 
@@ -171,6 +193,9 @@ class MMSMessage(object):
     bcc = set()
     linked_id = ""
     priority = ""
+    relay_server = ""
+    ua_caps = ""
+    reply_charging_id = ""
     handling_app = ""
     reply_to_app = ""
     app_info = ""
@@ -189,7 +214,6 @@ class MMSMessage(object):
             self.created_ts = int(time.time())
             self.template = models.template.MMSMessageTemplate(template_id)
             self.save()
-            rdb.expireat('mms-' + self.id, int(time.time()) + MMS_TTL)
         else:
             self.load(message_id)
 
@@ -209,6 +233,9 @@ class MMSMessage(object):
             'bcc': ",".join(self.bcc),
             'linked_id': self.linked_id,
             'priority': self.priority,
+            'relay_server': self.relay_server,
+            'ua_caps': self.ua_caps,
+            'reply_charging_id': self.reply_charging_id,
             'handling_app': self.handling_app,
             'reply_to_app': self.reply_to_app,
             'app_info': self.app_info,
@@ -219,6 +246,7 @@ class MMSMessage(object):
             'created_ts': self.created_ts,
             'processed_ts': self.processed_ts,
         })
+        rdb.expireat('mms-' + self.id, int(time.time()) + MMS_TTL)
 
 
     def load(self, msgid):
@@ -241,6 +269,9 @@ class MMSMessage(object):
             self.bcc = set(l.split(",")) if len(l) > 0 else set()
             self.linked_id = md['linked_id']
             self.priority = md['priority']
+            self.relay_server = md['relay_server']
+            self.ua_caps = md['ua_caps']
+            self.reply_charging_id = md['reply_charging_id']
             self.handling_app = md['handling_app']
             self.reply_to_app = md['reply_to_app']
             self.app_info = md['app_info']
@@ -267,6 +298,9 @@ class MMSMessage(object):
             'bcc': list(self.bcc),
             'linked_id': self.linked_id,
             'priority': self.priority,
+            'relay_server': self.relay_server,
+            'ua_caps': self.ua_caps,
+            'reply_charging_id': self.reply_charging_id,
             'handling_app': self.handling_app,
             'reply_to_app': self.reply_to_app,
             'app_info': self.app_info,
@@ -293,13 +327,19 @@ class MMSMessage(object):
         return d
 
 
+    @classmethod
+    def crossref(cls, xref, msgid):
+        rdb.hset("mms-" + msgid, 'provider_ref', xref)
+        rdb.set('mmsxref-' + xref, msgid, ex=int(time.time()) + MMS_TTL)
+
+
     def nq(self, gateway):
         self.gateway = gateway
         q_tx = rq.Queue("QTX-" + (gateway or DEFAULT_GATEWAY), connection=rdbq)
         q_tx.enqueue_call(
             func='models.gateway.send_mms', args=( self.id, ), 
             job_id=self.id,
-            meta={ 'retries': MAX_TX_RETRIES },
+            meta={ 'retries': MAX_GW_RETRIES },
             ttl=30
         )
         log.info("[{}] transmission {} queued for processing".format(gateway, self.id))

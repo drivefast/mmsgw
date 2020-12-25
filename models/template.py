@@ -22,118 +22,122 @@ def get_mms_template(tplid):
 
 @bottle.post(URL_ROOT + "mms")
 def create_mms_template():
-    tj = bottle.request.json
+    td = bottle.request.json
     t = MMSMessageTemplate()
 
-    t.origin = tj.get('origin', "")
+    t.origin = td.get('origin', "")
     t.show_sender = -1
-    if type(tj.get('show_sender')) == bool:
-        t.show_sender = 1 if tj['show_sender'] else 0
-    t.subject = tj.get('subject', "")
-    t.earliest_delivery = tj.get('earliest_delivery', 0)
-    t.expire_after = tj.get('expire_after', 0)
-    t.deliver_latest = tj.get('deliver_latest', 0)
-    t.message_class = tj.get('message_class', "") if tj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
-    t.content_class = tj.get('content_class', "") if tj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
-    t.charged_party = tj.get('charged_party', "") if tj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY else ""
+    if type(td.get('show_sender')) == bool:
+        t.show_sender = 1 if td['show_sender'] else 0
+    t.subject = td.get('subject', "")
+    t.earliest_delivery = td.get('earliest_delivery', 0)
+    t.expire_after = td.get('expire_after', 0)
+    t.deliver_latest = td.get('deliver_latest', 0)
+    t.message_class = td.get('message_class', "") if td.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
+    t.content_class = td.get('content_class', "") if td.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
+    t.charged_party = td.get('charged_party', "") if td.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY else ""
     t.drm = -1
-    if type(tj.get('drm')) == bool:
-        t.drm = 1 if tj['drm'] else 0
+    if type(td.get('drm')) == bool:
+        t.drm = 1 if td['drm'] else 0
     t.content_adaptation = -1
-    if type(tj.get('content_adaptation')) == bool:
-        t.content_adaptation = 1 if tj.get('content_adaptation') else 0
+    if type(td.get('content_adaptation')) == bool:
+        t.content_adaptation = 1 if td.get('content_adaptation') else 0
     t.can_redistribute = -1
-    if type(tj.get('can_redistribute')) == bool:
-        t.can_redistribute = 1 if tj.get('can_redistribute') else 0
+    if type(td.get('can_redistribute')) == bool:
+        t.can_redistribute = 1 if td.get('can_redistribute') else 0
 
-    parts = []
-    for pj in tj.get('parts', []):
-        if type(pj) is dict:
+    t.parts = []
+    for pd in td.get('parts', []):
+        if type(pd) is dict:
             p = MMSMessagePart()
-            p.content_type = pj.get('content_type', "")
+            p.content_type = pd.get('content_type', "")
             if p.content_type not in ACCEPTED_CONTENT_TYPES:
                 continue
-            if len(pj.get('content', "")) > 0 and len(pj.get('content_url', "")) > 0:
+            if len(pd.get('content', "")) > 0 and len(pd.get('content_url', "")) > 0:
                 continue
-            p.content = pj.get('content', "")
-            p.content_url = pj.get('content_url', "")
-            p.content_name = pj.get('content_name', p.part_id)
+            p.content = pd.get('content', "")
+            p.content_url = pd.get('content_url', "")
+            p.content_name = pd.get('content_name', p.part_id)
             p.save()
             if p.content_type == "application/smil":
                 # need to keep the smil in first position
                 t.parts.insert(0, p.part_id)
             else:
                 t.parts.append(p.part_id)
-        elif isinstance(pj, basestring) and rdb.exists("mmspart-" + pj):
-            t.parts.append(pj)
+        elif isinstance(pd, basestring) and rdb.exists("mmspart-" + pd):
+            t.parts.append(pd)
 
     t.save()
 
-    mj = tj.get('send')
-    if mj:
+    md = td.get('send')
+    if md:
         # caller opted for the message to be sent out right away, build a transmission
         m = models.message.MMSMessage(template_id=t.id)
-        m.destination = makeset(mj.get("destination"))
-        m.cc = makeset(mj.get('cc'))
-        m.bcc = makeset(mj.get('bcc'))
+        m.destination = makeset(md.get("destination"))
+        m.cc = makeset(md.get('cc'))
+        m.bcc = makeset(md.get('bcc'))
         #! add all variables here
-        m.nq(mj.get('gateway', DEFAULT_GATEWAY))
+        m.nq(md.get('gateway', DEFAULT_GATEWAY))
 
     return t.as_dict()
+
 
 @bottle.put(URL_ROOT + "mms/<tplid>")
 def update_mms_template(tplid):
     t = MMSMessage(tplid)
     if t:
-        tj = bottle.request.json
-        if tj.get('origin'):
-            t.origin = tj['origin']
-        if type(tj.get('show_sender')) == bool:
-            t.show_sender = 1 if tj['show_sender'] else 0
-        if tj.get('subject'):
-            t.subject = tj['subject']
-        if tj.get('earliest_delivery'):
-            t.earliest_delivery = tj['earliest_delivery']
-        if tj.get('expire_after'):
-            t.expire_after = tj['expire_after']
-        if tj.get('deliver_latest'):
-            t.deliver_latest = tj['deliver_latest'] 
-        if tj.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES:
-            t.message_class = tj['message_class'].lower()
-        if tj.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES:
-            t.content_class = tj['content_class'].lower()
-        if tj.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY:
-            t.charged_party = tj['charged_party'].lower()
-        if type(tj.get('drm')) == bool:
-            t.drm = 1 if tj['drm'] else 0
-        if type(tj.get('content_adaptation')) == bool:
-            t.content_adaptation = 1 if tj['content_adaptation'] else 0
-        if type(tj.get('can_redistribute')) == bool:
-            t.can_redistribute = 1 if tj['can_redistribute'] else 0
+        td = bottle.request.json
+        if td.get('origin'):
+            t.origin = td['origin']
+        if type(td.get('show_sender')) == bool:
+            t.show_sender = 1 if td['show_sender'] else 0
+        if td.get('subject'):
+            t.subject = td['subject']
+        if td.get('earliest_delivery'):
+            t.earliest_delivery = td['earliest_delivery']
+        if td.get('expire_after'):
+            t.expire_after = td['expire_after']
+        if td.get('deliver_latest'):
+            t.deliver_latest = td['deliver_latest'] 
+        if td.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES:
+            t.message_class = td['message_class'].lower()
+        if td.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES:
+            t.content_class = td['content_class'].lower()
+        if td.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY:
+            t.charged_party = td['charged_party'].lower()
+        if type(td.get('drm')) == bool:
+            t.drm = 1 if td['drm'] else 0
+        if type(td.get('content_adaptation')) == bool:
+            t.content_adaptation = 1 if td['content_adaptation'] else 0
+        if type(td.get('can_redistribute')) == bool:
+            t.can_redistribute = 1 if td['can_redistribute'] else 0
 
-        for pj in tj.get('parts', []):
-            if pj is None:
+        for pd in td.get('parts', []):
+            if pd is None:
                 # first part item being null means to reset the mms parts list
                 t.parts = []
                 continue
-            if type(pj) is dict:
+            if type(pd) is dict:
                 p = MMSMessagePart()
-                p.content_type = pj.get('content_type', "")
+                p.content_type = pd.get('content_type')
+                if p.content_type is None:
+                    # remove a part with the given name, if it has no content_type
+                    continue
                 if p.content_type not in ACCEPTED_CONTENT_TYPES:
                     continue
-                if len(pj.get('content', "")) > 0 and len(pj.get('content_url', "")) > 0:
+                if len(pd.get('content', "")) > 0 and len(pd.get('content_url', "")) > 0:
                     continue
-                p.content = pj.get('content', "")
-                p.content_url = pj.get('content_url', "")
-                p.content_name = pj.get('content_name', p.part_id)
+                p.content = pd.get('content', "")
+                p.content_url = pd.get('content_url', "")
+                p.content_name = pd.get('content_name', p.part_id)
                 p.save()
                 if p.content_type == "application/smil":
                     # need to keep the smil in first position
                     t.parts.insert(0, p.part_id)
                 else:
                     t.parts.append(p.part_id)
-            elif isinstance(pj, basestring) and rdb.exists("mmspart-" + pj):
-                t.parts.append(pj)
+            elif isinstance(pd, basestring) and rdb.exists("mmspart-" + pd):
+                t.parts.append(pd)
 
         t.save()
         return m.as_dict()
@@ -152,16 +156,16 @@ def get_mms_part(partid):
 
 @bottle.post(URL_ROOT + "mms_part")
 def create_mms_part():
-    pj = bottle.request.json
+    pd = bottle.request.json
     p = MMSMessagePart()
-    p.content_type = pj.get('content_type', "")
+    p.content_type = pd.get('content_type', "")
     if p.content_type not in ACCEPTED_CONTENT_TYPES:
         return json_error(400, "Bad request", "Missing or invalid content type")    
-    if len(pj.get('content', "")) > 0 and len(pj.get('content_url', "")) > 0:
+    if len(pd.get('content', "")) > 0 and len(pd.get('content_url', "")) > 0:
         return json_error(400, "Bad request", "Either use 'content' OR 'content_url'")
-    p.content = pj.get('content', "")
-    p.content_url = pj.get('content_url', "")
-    p.content_name = pj.get('content_name', p.part_id)
+    p.content = pd.get('content', "")
+    p.content_url = pd.get('content_url', "")
+    p.content_name = pd.get('content_name', p.part_id)
 
     p.save()
     return p.as_dict()
@@ -191,8 +195,6 @@ class MMSMessageTemplate(object):
             self.load(tplid)
         else:
             self.id = str(uuid.uuid4()).replace("-", "")
-            self.save()
-            rdb.expireat('mmstpl-' + self.id, int(time.time()) + MMS_TEMPLATE_TTL)
 
     def save(self):
     # save to storage
@@ -211,6 +213,7 @@ class MMSMessageTemplate(object):
             'can_redistribute': self.can_redistribute,
             'parts': ",".join(self.parts),
         })
+        rdb.expireat('mmstpl-' + self.id, int(time.time()) + MMS_TEMPLATE_TTL)
 
     def load(self, tplid):
     # load from storage
@@ -240,11 +243,38 @@ class MMSMessageTemplate(object):
     def as_dict(self):
         ret = {
             'id': self.id,
-            'content_class': self.content_class,
             'origin': self.origin,
             'subject': self.subject,
             'parts': []
         }
+        if self.show_sender == 0:
+            ret['show_sender'] = False
+        elif self.show_sender == 1:
+            ret['show_sender'] = True
+        if self.earliest_delivery:
+            ret['earliest_delivery'] = self.earliest_delivery
+        if self.deliver_latest:
+            ret['deliver_latest'] = self.deliver_latest
+        if self.expire_after:
+            ret['expire_after'] = self.expire_after
+        if self.charged_party:
+            ret['charged_party '] = self.charged_party
+        if self.message_class:
+            ret['message_class'] = self.message_class
+        if self.content_class:
+            ret['content_class'] = self.content_class
+        if self.drm == 0:
+            ret['drm'] = False
+        elif self.drm == 1:
+            ret['drm'] = True
+        if self.content_adaptation == 0:
+            ret['content_adaptation'] = False
+        elif self.content_adaptation == 1:
+            ret['content_adaptation'] = True
+        if self.can_redistribute == 0:
+            ret['can_redistribute'] = False
+        elif self.can_redistribute == 1:
+            ret['can_redistribute'] = True
         for pid in self.parts:
             if pid:
                 p = MMSMessagePart(pid)
@@ -288,8 +318,6 @@ class MMSMessagePart(object):
             self.load(pid)
         else:
             self.part_id = str(uuid.uuid4()).replace("-", "")
-            self.save()
-            rdb.expireat('mmspart-' + self.part_id, int(time.time()) + MMS_TEMPLATE_TTL)
 
     def save(self):
     # save to storage
@@ -302,6 +330,7 @@ class MMSMessagePart(object):
             rdb.hset('mmspart-' + self.part_id, 'content', self.content)
         else:
             rdb.hdel('mmspart-' + self.part_id, 'content')
+        rdb.expireat('mmspart-' + self.part_id, int(time.time()) + MMS_TEMPLATE_TTL)
 
     def load(self, pid):
     # load from storage

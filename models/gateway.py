@@ -30,35 +30,6 @@ import models.template
 
 
 
-MM7_ROOT_NS = "soapenv"
-MM7_STATUS = {
-    '1000': "Success",
-    '1100': "Partial success",
-    '2000': "Client error",
-    '2001': "Operation restricted",
-    '2002': "Address Error",
-    '2003': "Address Not Found",
-    '2004': "Multimedia content refused",
-    '2005': "Message ID Not found",
-    '2006': "LinkedID not found",
-    '2007': "Message format corrupt",
-    '2008': "Application ID not found",
-    '2009': "Reply Application ID not found",
-    '3000': "Server Error",
-    '3001': "Not Possible",
-    '3002': "Message rejected",
-    '3003': "Multiple addresses not supported",
-    '3004': "Application Addressing not supported",
-    '4000': "General service error",
-    '4001': "Improper identification",
-    '4002': "Unsupported version",
-    '4003': "Unsupported operation",
-    '4004': "Validation error",
-    '4005': "Service error",
-    '4006': "Service unavailable",
-    '4007': "Service denied",
-    '4008': "Application denied",
-}
 TOP_PART_BOUNDARY = "========Top-Part-Boundary"
 
 THIS_GW = None
@@ -82,9 +53,7 @@ def send_mms(txid):
     if heartbeats_left is None:
         # this shouldnt happen: if the heartbeat key is gone, the gateway instance is dead
         # (if it does happen, then it's just my bad logic)
-        log.alarm("[{}] gateway still alive, despite missing {} heartbeats"
-            .format(gw.gwid, GW_HEARTBEATS - heartbeats_left)
-        )
+        log.alarm("[{}] gateway still alive, despite missing all heartbeats".format(gw.gwid))
         reschedule(this_job, gw.q_tx)
     elif heartbeats_left < (GW_HEARTBEATS - 1):
         # is this gateway is probably not healthy enough to process the job, have it skip it
@@ -127,44 +96,72 @@ def send_mms(txid):
             reschedule(this_job, gw.q_tx)
 
 
-def mm4rx(fn):
+def inbound(content_fn, meta_xml=None):
+
+    # handled message types
+    MM4_TYPE = {
+        'mm4_forward.req': "INBOUND_MMS",
+        'mm4_forward.res': "OUTBOUND_ACK",
+        'mm4_delivery_report.req': "OUTBOUND_DR",
+        'mm4_read_reply_report.req': "OUTBOUND_RR",
+    }
+    MM7_TYPE = {
+        'deliverreq': "INBOUND_MMS",
+        'deliveryreportreq': "OUTBOUND_DR",
+        'readreplyreq': "OUTBOUND_RR",
+    }
+
     # handle received MM4 SMTP message
     gw = THIS_GW
     jid = rq.get_current_job().id
+    meta = None
     res = None
-    try:
-        with open(fn, "r") as fh:
-            e = email.message_from_file(fh)
-            if e["X-Mms-3GPP-MMS-Version"] is None:
-                log.warning("[{}] {} not an MM4 message".format(gw.gwid, jid))
-                return
-            e_type = e["X-Mms-Message-Type"]
-            log.debug("[{}] {} handling as {} MM4 message".format(gw.gwid, jid, e_type))
-            if e_type is None:
-                log.info("[{}] {} has no MM4 message type".format(gw.gwid, jid))
-            elif e_type.lower() == "mm4_forward.req":
-                res = gw.process_inbound_mms(e)
-            elif e_type.lower() == "mm4_forward.res":
-                res = gw.process_ack_for_outbound(e)
-            elif e_type.lower() == "mm4_delivery_report.req":
-                res = gw.process_dr_for_outbound(e)
-            elif e_type.lower() == "mm4_read_reply_report.req":
-                res = gw.process_rr_for_outbound(e)
-            else:
-                log.info("[{}] {} unhandled MM4 message type '{}'".format(gw.gwid, jid, e_type))
-    except IOError as ioe:
-        log.info("[{}] {} MM4 error reading content: {}".format(gw.gwid, jid, fn, ioe))
-    except email.errors.MessageParseError as mpe:
-        log.info("[{}] {} MM4 content could not be parsed: {}".format(gw.gwid, jid, mpe))
-    except Exception as ex:
-        log.warning("[{}] {} internal error handling received MM4: {}".format(gw.gwid, jid, ex))
-        log.debug("[{}] {} traceback: {}".format(gw.gwid, jid, traceback.format_exc()))
+    handler = ""
+    if content_fn:
+        try:
+            fn = gw.rx_dir + content_fn[0:2] + "/" + content_fn
+            with open(fn, "r") as fh:
+                e = email.message_from_file(fh)
+                if gw.protocol == "MM4":
+                    if e["X-Mms-3GPP-MMS-Version"] is None:
+                        log.warning("[{}] {} not an MM4 message".format(gw.gwid, jid))
+                        return
+                    if e["X-Mms-Message-Type"] is None:
+                        log.warning("[{}] {} missing MM4 message type".format(gw.gwid, jid))
+                        return
+                    handler = MM4_TYPE.get(e["X-Mms-Message-Type"].lower())
+                elif gw.protocol == "MM7":
+                    meta = ET.fromstring(meta_xml)
+                    ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
+                    tag = meta.tag.replace(ns, "")
+                    handler = MM7_TYPE.get(tag.lower())
+        except IOError as ioe:
+            log.info("[{}] {} error reading MMS content from {}: {}".format(gw.gwid, jid, fn, ioe))
+        except email.errors.MessageParseError as mpe:
+            log.info("[{}] {} MM4 content could not be parsed: {}".format(gw.gwid, jid, mpe))
+        except Exception as ex:
+            log.warning("[{}] {} internal error handling received MMS: {}".format(gw.gwid, jid, ex))
+            log.debug("[{}] {} traceback: {}".format(gw.gwid, jid, traceback.format_exc()))
+    else:
+        handler = MM7_TYPE.get(meta.tag.lower())
+    log.debug("[{}] {} handling as {} {} message".format(gw.gwid, jid, gw.protocol, handler))
+
+    if handler is None:
+        log.info("[{}] {} unhandled message type".format(gw.gwid, jid))
+    elif handler == "INBOUND_MMS":
+        res = gw.process_inbound_mms(jid, e, meta)
+    elif handler == "OUTBOUND_ACK":
+        res = gw.process_ack_for_outbound(e, meta)
+    elif handler == "OUTBOUND_DR":
+        res = gw.process_dr_for_outbound(e, meta)
+    elif handler == "OUTBOUND_RR":
+        res = gw.process_rr_for_outbound(e, meta)
 
     if res is not None:
         pass
 
 
-def inbound_mms_event(rxid, ev, ref, ev_status, ev_desc, ev_target, applies_to_num=[]):
+def send_event_for_inbound_mms(rxid, ev, ref, ev_status, ev_desc, ev_target, applies_to_num=[]):
     gw = THIS_GW
     if ev == 'ack':
         gw.send_ack_for_inbound(rxid, ev_status, ev_desc, applies_to_num)
@@ -172,38 +169,6 @@ def inbound_mms_event(rxid, ev, ref, ev_status, ev_desc, ev_target, applies_to_n
         gw.send_dr_for_inbound(applies_to_num, ev_target, rxid, ref, ev_status, ev_desc)
     elif ev == 'rr':
         gw.send_rr_for_inbound(applies_to_num, ev_target, rxid, ref, ev_status, ev_desc)
-
-
-def process_event(txid, meta):
-    gw = THIS_GW
-    
-
-def mm7rx(txid, meta, content):
-    gw = THIS_GW
-    msg, status = gw.create_message(meta)
-    if msg:
-        if not content.is_multipart():
-            m = content.get_payload(decode=True)
-            log.info("Media: {} size {}".format(
-                content.get_content_type(),
-                content.get("Content-Length", "unknown")
-            ))
-            if bad_media:
-                status = '2004'
-        else:
-            one_bad = False; all_bad = False
-            media_parts = content.get_payload()
-            for mp in media_parts:
-                bad_media = False
-                m = mp.get_payload(decode=True)
-                log.info("Media: {} size {}".format(
-                    mp.get_content_type(),
-                    mp.get("Content-Length", "unknown")
-                ))
-                one_bad = one_bad or bad_media
-                all_bad = all_bad and bad_media
-            if one_bad: status = '1100'
-            if all_bad: status = '2004'
 
 
 def reschedule(job, queue):
@@ -243,6 +208,7 @@ class MMSGateway(object):
     # inbound
     this_domain = None   # emails coming from any of these domains will be dispatched to this gateway
     this_host = None
+    rx_dir = None
     mime_parts_url_prefix = ""
     mms_received_url = ""
 
@@ -284,6 +250,7 @@ class MMSGateway(object):
         if len(cfg['outbound'].get('username', "")) > 0 and len(cfg['outbound'].get('password', "")) > 0:
             self.auth = ( cfg['outbound']['username'], cfg['outbound']['password'] )
 
+        self.rx_dir = cfg['inbound'].get('received_content_dir', "/tmp/rx/")
         self.mime_parts_url_prefix = cfg['inbound'].get('mime_parts_url_prefix', "")
         self.mms_received_url = cfg['inbound'].get('mms_received_url', "")
 
@@ -567,22 +534,21 @@ class MM4Gateway(MMSGateway):
             list(map(lambda e: self._phone_num_from_address(e), cdl.split(",")))
 
 
-    def process_inbound_mms(self, m):
+    def process_inbound_mms(self, mid, m, _):
         if "X-Mms-Message-Id" in m:
-            tpl = models.template.MMSMessageTemplate()
             rx = models.message.MMSMessage()
+            rx.id = mid
             rx.provider_ref = m['X-Mms-Message-Id'].replace("\"", "")
             rx.last_tran_id = m['X-Mms-Transaction-Id'].replace("\"", "")
             rx.ack_at_addr = m['X-Mms-Originator-System'].replace("\"", "")
             rx.direction = 1
-            rx.template = tpl
             rx.gateway_id = self.gwid
             rx.gateway = self.group
         else:
             log.warning("[{}] MM4 message missing X-Mms-Message-Id header".format(self.gwid))
             return
         log.debug("[{}] {} creating MO from {} to {}".format(self.gwid, rx.id, m['From'], m['To']))
-        rx.origin = tpl.origin = self._phone_num_from_address(m['From'])
+        rx.origin = rx.template.origin = self._phone_num_from_address(m['From'])
         rx.destination = set(self._parse_address_list(m['To']))
         rx.cc = set(self._parse_address_list(m['Cc']))
         rx.bcc = set(self._parse_address_list(m['Bcc']))
@@ -595,36 +561,36 @@ class MM4Gateway(MMSGateway):
                 .format(self.gwid, rx.id, m['X-Mms-Expiry'])
             )            
         rx.processed_ts = int(time.time())
-        tpl.subject = m.get('Subject', "")
+        rx.template.subject = m.get('Subject', "")
         if m['X-Mms-Expiry']:
             try:
-                tpl.expire_after = int(time.time() + float(m['X-Mms-Expiry']))
+                rx.template.expire_after = int(time.time() + float(m['X-Mms-Expiry']))
             except ValueError:
                 pass
-            if tpl.expire_after == 0:
+            if rx.template.expire_after == 0:
                 try:
-                    tpl.expire_after = email.utils.mktime_tz(email.utils.parsedate_tz(m['X-Mms-Expiry']))
+                    rx.template.expire_after = email.utils.mktime_tz(email.utils.parsedate_tz(m['X-Mms-Expiry']))
                 except Exception:
                     log.warning("[{}] {} Cannot parse expiry date of message '{}'; considering never expires"
                         .format(self.gwid, rx.id, m['X-Mms-Expiry'])
                     )
                     pass
-        tpl.message_class = m['X-Mms-Message-Class'] or ""
+        rx.template.message_class = m['X-Mms-Message-Class'] or ""
         rx.priority = m['X-Mms-Priority'] or ""
         if 'X-Mms-Sender-Visibility' in m:
-            tpl.show_sender = \
+            rx.template.show_sender = \
                 1 if m['X-Mms-Sender-Visibility'].lower() == "show" else \
                 0 if m['X-Mms-Sender-Visibility'].lower() == "hide" else \
                 -1
         if 'X-Mms-Adaptation-Allowed' in m:
-            tpl.content_adaptation = \
+            rx.template.content_adaptation = \
                 1 if m['X-Mms-Adaptation-Allowed'].lower() == "yes" else \
                 0 if m['X-Mms-Adaptation-Allowed'].lower() == "no" else \
                 -1
         if 'X-Mms-Content-Class' in m and m['X-Mms-Content-Class'] in ACCEPTED_CONTENT_CLASSES:
-            tpl.content_class = m['X-Mms-Content-Class']
+            rx.template.content_class = m['X-Mms-Content-Class']
         if 'X-Mms-Drm-Content' in m:
-            tpl.drm = \
+            rx.template.drm = \
                 1 if m['X-Mms-Drm-Content'].lower() == "yes" else \
                 0 if m['X-Mms-Drm-Content'].lower() == "no" else \
                 -1
@@ -632,11 +598,11 @@ class MM4Gateway(MMSGateway):
         rx.reply_to_app = m['X-Mms-Reply-Applic-ID'] or ""
         rx.app_info = m['X-Mms-Aux-Applic-Info'] or ""
 
-        tpl.save()
+        rx.template.save()
         rx.save()
         rx.set_state([], "FORWARDED", "", "", self.gwid, {})
         log.debug("[{}] {} prepared message {} and reception record; will parse content"
-            .format(self.gwid, rx.id, tpl.id)
+            .format(self.gwid, rx.id, rx.template.id)
         )
 
         # parse content parts
@@ -653,9 +619,9 @@ class MM4Gateway(MMSGateway):
                     ret_code = '400'
                     ret_desc = "Unexpected multipart in content"
                 else:
-                    ret_code, ret_desc = tpl.add_part_from_mime(mp, self.mime_parts_url_prefix)
+                    ret_code, ret_desc = rx.template.add_part_from_mime(mp, self.mime_parts_url_prefix)
                 if ret_code == '200':
-                    p = models.template.MMSMessagePart(tpl.parts[-1])
+                    p = models.template.MMSMessagePart(rx.template.parts[-1])
                     log.info("[{}] {} Processed {} part '{}' stored as {}".format(
                         self.gwid, rx.id, p.content_type, p.content_name, 
                         p.content_url or "object property"
@@ -664,7 +630,7 @@ class MM4Gateway(MMSGateway):
                     log.info("[{}] {} Not processed message part: {} {}".format(
                         self.gwid, rx.id, ret_code, ret_desc
                     ))
-            tpl.save()
+            rx.template.save()
         except email.errors.MessageError as ee:
             log.info("[{}] {} Message content processing error: {}".format(self.gwid, rx.id, ee))
             ret_code = '400'
@@ -813,7 +779,7 @@ class MM4Gateway(MMSGateway):
                     rx.set_state(rcpt, "READ", rstatus, rstatus_desc, self.gwid, {})
 
 
-    def process_ack_for_outbound(self, em):
+    def process_ack_for_outbound(self, em, __):
         txid = em['X-Mms-Message-Id'].replace("\"", "")
         log.debug("[{}] {} MT ack: {}".format(self.gwid, txid, em.as_string()))
         tx = models.message.MMSMessage(txid)
@@ -829,7 +795,7 @@ class MM4Gateway(MMSGateway):
         tx.set_state(destinations, status, code, em['X-Mms-Request-Status-Code'] + " " + em['X-Mms-Status-Text'], self.gwid)
 
 
-    def process_dr_for_outbound(self, em):
+    def process_dr_for_outbound(self, em, __):
         txid = em['X-Mms-Message-Id']
         tx = models.message.MMSMessage(txid)
         if tx is None:
@@ -877,15 +843,46 @@ class MM4Gateway(MMSGateway):
                 log.warning("[{}] {} MT DLR confirmation failed: {}".format(self.gwid, txid, ret_desc))
 
 
-    def process_rr_for_outbound(self, m):
+    def process_rr_for_outbound(self, m, _):
         pass
 
+
+MM7_STATUS = {
+    '1000': "Success",
+    '1100': "Partial success",
+    '2000': "Client error",
+    '2001': "Operation restricted",
+    '2002': "Address Error",
+    '2003': "Address Not Found",
+    '2004': "Multimedia content refused",
+    '2005': "Message ID Not found",
+    '2006': "LinkedID not found",
+    '2007': "Message format corrupt",
+    '2008': "Application ID not found",
+    '2009': "Reply Application ID not found",
+    '3000': "Server Error",
+    '3001': "Not Possible",
+    '3002': "Message rejected",
+    '3003': "Multiple addresses not supported",
+    '3004': "Application Addressing not supported",
+    '4000': "General service error",
+    '4001': "Improper identification",
+    '4002': "Unsupported version",
+    '4003': "Unsupported operation",
+    '4004': "Validation error",
+    '4005': "Service error",
+    '4006': "Service unavailable",
+    '4007': "Service denied",
+    '4008': "Application denied",
+}
 
 class MM7Gateway(MMSGateway):
 
     originator_system = None
     vaspid = None
     vasid = None
+    verify_vasid = ""
+    verify_vaspid = ""
     service_code = None
     peer_timeout = 10
 
@@ -902,6 +899,8 @@ class MM7Gateway(MMSGateway):
         self.vasid = cfg['gateway'].get('vasid')
         self.service_code = cfg['gateway'].get('service_code')
         self.peer_timeout = cfg['outbound'].get('timeout', 10.)
+        self.vaspid = cfg['inbound'].get('verify_vaspid', "")
+        self.vasid = cfg['inbound'].get('verify_vasid', "")
 
 
     def start(self):
@@ -916,7 +915,7 @@ class MM7Gateway(MMSGateway):
 
     def heartbeat(self):
         if rdbq.decr('gwstat-' + self.gwid) <= -1:
-            # this gateway beeded to death, we need to stop the app
+            # this gateway bleeded to death, we need to stop the app
             rdbq.delete('gwstat-' + self.gwid)
             return False
         try:
@@ -1025,7 +1024,7 @@ class MM7Gateway(MMSGateway):
 
         env_part = email.message.Message()
         env_part.set_type("text/xml")
-        env_part.add_header("Content-ID", tx.d + ".envelope")
+        env_part.add_header("Content-ID", tx.id + ".envelope")
         env_part.set_payload(env_str)
         top_part.attach(env_part)
 
@@ -1034,7 +1033,7 @@ class MM7Gateway(MMSGateway):
         first_part_id = ""
 
         for pid in tx.template.parts:
-            p = models.message.MMSMessagePart(pid)
+            p = models.template.MMSMessagePart(pid)
             if p.content:
                 # actual content is provided in the part object itself
                 content = p.content
@@ -1103,7 +1102,7 @@ class MM7Gateway(MMSGateway):
             content_started = content_started or (l == "--" + TOP_PART_BOUNDARY)
             if content_started and not l.startswith("MIME-Version:"):
                 content += l + "\r\n"
-        log.debug("[{}] sending {} MM7 with headers: {}"
+        log.debug("[{}] {} sending MM7 with headers: {}"
             .format(self.gwid, msgid, headers)
         )
         log.debug("[{}] {} content: {}{}"
@@ -1136,7 +1135,10 @@ class MM7Gateway(MMSGateway):
                      status_code = stat.get('StatusCode', "0")
                      status_text = stat.get('StatusText', "")
                      if status_code in [ "1000", "1100" ]:
-                         return None, find_in_dict(env, 'MessageID')
+                         # the message ID returned by the MMSC will need to reference the message
+                         # object we created
+                         models.message.MMSMessage.crossref(find_in_dict(env, 'MessageID'), msgid)
+                         return None, None
                      else: 
                          return status_code, status_text 
                  else:
@@ -1158,9 +1160,9 @@ class MM7Gateway(MMSGateway):
         }).text = transaction
         env_body = ET.SubElement(env, "soapenv:Body")
         rp = ET.SubElement(env_body, message_type, { 'xmlns': MM7_NAMESPACE['mm7'] })
-        ET.SubElement(rp, "MM7Version").text = VERSION['mm7']
+        ET.SubElement(rp, "MM7Version").text = MM7_VERSION['mm7']
         stat = ET.SubElement(rp, "Status")
-        ET.SubElement(stat, "StatusCode").text= status
+        ET.SubElement(stat, "StatusCode").text = status
         ET.SubElement(stat, "StatusText").text = MM7_STATUS[status]
         if msgid:
             ET.SubElement(rp, "MessageID").text = msgid
@@ -1169,30 +1171,178 @@ class MM7Gateway(MMSGateway):
         return soap
 
 
-    def create_message(self, x):
-        pass
+    def process_inbound_mms(self, mid, content, meta):
+        ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
+
+#MMSRelayServerID -> rx.relay_server 
+#LinkedID -> rx.linked_id
+#Sender
+#Recipients 
+#TimeStamp
+#ReplyChargingID -> rx.reply_charging_id 
+#Priority
+#Subject
+#Content-Type
+#UACapabilities -> rx.ua_caps
+#ApplicID
+#ReplyApplicID
+#AuxApplicInfo
+#Content
+
+        rx = models.message.MMSMessage(mid)
+        if rx.id is None:
+            log.warning("[{}] {} Incoming MM7 message missing header, regenerating".format(self.gwid, mid))
+            rx = models.message.MMSMessage()
+            rx.direction = 1
+            rx.save()
+        rx.gateway_id = self.gwid
+        rx.gateway = self.group
+        log.debug("[{}] {} creating MO from {} to {}".format(self.gwid, rx.id, m['From'], m['To']))
+
+        rx.vasid = meta.findtext("./" + ns + "VASID", "")
+        rx.vaspid = meta.findtext("./" + ns + "VASPID", "")
+        if rx.vasid != gw.verify_vasid or rx.vaspid != gw.verify_vaspid:
+            log.warning("[{}] {} MO rejected, does not verify VASID or VASPID (received '{}', '{}')"
+                .format(self.gwid, mid, rx.vasid, rx.vaspid)
+            )
+            return
+
+        rx.origin = rx.template.origin = self._phone_num_from_address(m['From'])
+        rx.destination = set(self._parse_address_list(m['To']))
+        rx.cc = set(self._parse_address_list(m['Cc']))
+        rx.bcc = set(self._parse_address_list(m['Bcc']))
+        try:
+            rx.created_ts = email.utils.mktime_tz(email.utils.parsedate_tz(m['Date']))
+        except Exception:
+            rx.created_ts = int(time.time())
+            log.warning("[{}] {} Cannot parse timestamp of message '{}'; replacing with current timestamp"
+                .format(self.gwid, rx.id, m['X-Mms-Expiry'])
+            )
+        rx.processed_ts = int(time.time())
+        rx.template.subject = m.get('Subject', "")
+
+        rx.priority = m['X-Mms-Priority'] or ""
+
+        rx.handling_app = m['X-Mms-Applic-ID'] or ""
+        rx.reply_to_app = m['X-Mms-Reply-Applic-ID'] or ""
+        rx.app_info = m['X-Mms-Aux-Applic-Info'] or ""
+
+        rx.template.save()
+        rx.save()
+        rx.set_state([], "FORWARDED", "", "", self.gwid, {})
+        log.debug("[{}] {} prepared message {} and reception record; will parse content"
+            .format(self.gwid, rx.id, rx.template.id)
+        )
+
+        # parse content parts
+        try:
+            if m.is_multipart():
+                mime_parts = m.get_payload()
+                log.debug("[{}] {} Handling content as multipart, {} parts"
+                    .format(self.gwid, rx.id, len(mime_parts))
+                )
+            else:
+                mime_parts = [ m ]
+            for mp in mime_parts:
+                if mp.is_multipart():
+                    ret_code = '400'
+                    ret_desc = "Unexpected multipart in content"
+                else:
+                    ret_code, ret_desc = rx.template.add_part_from_mime(mp, self.mime_parts_url_prefix)
+                if ret_code == '200':
+                    p = models.template.MMSMessagePart(rx.template.parts[-1])
+                    log.info("[{}] {} Processed {} part '{}' stored as {}".format(
+                        self.gwid, rx.id, p.content_type, p.content_name,
+                        p.content_url or "object property"
+                    ))
+                else:
+                    log.info("[{}] {} Not processed message part: {} {}".format(
+                        self.gwid, rx.id, ret_code, ret_desc
+                    ))
+            rx.template.save()
+        except email.errors.MessageError as ee:
+            log.info("[{}] {} Message content processing error: {}".format(self.gwid, rx.id, ee))
+            ret_code = '400'
+            ret_desc = "Error processing message MIME parts"
+        except Exception as ex:
+            log.info("[{}] {} Message content processing failure: {}".format(self.gwid, rx.id, ex))
+            log.debug(traceback.format_exc())
+            ret_code = '500'
+            ret_desc = "Error processing message MIME parts"
+
+        if 'X-Mms-Ack-Request' in m and m['X-Mms-Ack-Request'].lower() == "yes":
+            # sender requested to send them an ack
+            if ret_code != "Ok" or self.auto_ack:
+                # if we have an error already, or the auto-ack is set, we send the MM4_forward.RES 
+                # right away; otherwise we count on the handling app to schedule the ack
+                self.send_inbound_ack(rx.id, ret_code, ret_desc)
+            else:
+                rx.ack_requested = True
+
+        if ret_code == "Ok" and str(m['X-Mms-Delivery-Report']).lower() == "yes":
+            # sender requested to send them DLR
+            if self.auto_dr:
+                self.send_inbound_dr(all_recipients, rx.origin, rx.id,
+                    "200", "Assume retrieved; downstream provides no delivery information"
+                )
+            else:
+                rx.dr_requested = True
+
+        rx.rr_requested = m['X-Mms-Read-Reply'] is not None and (m['X-Mms-Read-Reply'].lower() == "yes")
+
+        rx.save()
+
+        if self.mms_received_url:
+            # let downstream application know that we received an MO
+            qmo = rq.Queue('QMO', connection=rdbq)
+            j = qmo.enqueue_call("backend.util.cb_post", ( self.mms_received_url, json.dumps(rx.as_dict()), ))
+            log.debug("[{}] {} posted MO to {} as job {}"
+                .format(self.gwid, rx.id, self.mms_received_url, j.id)
+            )
 
 
-    def process_mt_dr_metadata(meta):
+
+
+        if not content.is_multipart():
+            m = content.get_payload(decode=True)
+            log.info("Media: {} size {}".format(
+                content.get_content_type(),
+                content.get("Content-Length", "unknown")
+            ))
+            if bad_media:
+                status = '2004'
+        else:
+            one_bad = False; all_bad = False
+            media_parts = content.get_payload()
+            for mp in media_parts:
+                bad_media = False
+                m = mp.get_payload(decode=True)
+                log.info("Media: {} size {}".format(
+                    mp.get_content_type(),
+                    mp.get("Content-Length", "unknown")
+                ))
+                one_bad = one_bad or bad_media
+                all_bad = all_bad and bad_media
+            if one_bad: status = '1100'
+            if all_bad: status = '2004'
+
+
+
+    def process_dr_for_outbound(self, _, meta):
         log.debug("DLR metadata elements: {}".format(list(meta)))
+        ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
         msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
         mt_status = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MMStatus", "").strip()
         # process Sender and Recipients/To|Cc|Bcc tags, with Number|ShortCode|RFC2822Address subtags
         return msgid, None
 
 
-    def process_mt_rr_metadata(meta):
+    def process_rr_for_outbound(self, _, meta):
+        ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
         msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
         return msgid, None
 
 
-    def process_mt_cancel_metadata(meta):
-        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
-        return msgid, None
 
-
-    def process_mt_replace_metadata(meta):
-        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
-        return msgid, None
 
 

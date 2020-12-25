@@ -11,8 +11,10 @@ import email, email.utils
 
 import traceback
 
+from constants import *
 from backend.logger import log
 from backend.storage import rdbq
+from backend.util import repo
 
 
 def dispatch(content, sender, receivers, source=None):
@@ -39,7 +41,7 @@ def dispatch(content, sender, receivers, source=None):
     mm4rx_id = str(uuid.uuid4()).replace("-", "")
     
     # move content as file to be processed
-    fn = cfg['general']['mail_repo'] + mm4rx_id + ".mm4"
+    fn = repo(cfg['general'].get('mm4rx_dir', "/tmp/rx/"), mm4rx_id + ".mm4")
     if cfg['general'].get('smtp_host'):
         with open(fn, "w") as fh:
             fh.write(content)
@@ -47,8 +49,9 @@ def dispatch(content, sender, receivers, source=None):
     # post a task for the gateway parser
     q_rx = rq.Queue("QRX-" + gw, connection=rdbq)
     q_rx.enqueue_call(
-        func='models.gateway.mm4rx', args=( fn, ),
+        func='models.gateway.inbound', args=( mm4rx_id + ".mm4", ),
         job_id=mm4rx_id,
+        meta={ 'retries': MAX_GW_RETRIES },
         ttl=30
     )
     log.info(">>>> message {}, queued for processing by gateway {}".format(mm4rx_id, gw))
