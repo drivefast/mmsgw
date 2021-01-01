@@ -80,7 +80,7 @@ This section details the interface offered by `mmsgw`, facing the application si
 
 
 ```
-POST /mms
+POST /mmsgw/v1/mms
 ```
 
 
@@ -111,7 +111,7 @@ On success, <code>mmsgw</code> replies with a full description of the template o
 
 
 ```
-PUT mms/<template_id>
+PUT /mmsgw/v1/mms/<template_id>
 ```
 
 
@@ -119,7 +119,7 @@ This method is provided to replace parameter values of an existing. The paramete
 
 
 ```
-DELETE mms/<template_id>
+DELETE /mmsgw/v1/mms/<template_id>
 ```
 
 
@@ -127,7 +127,7 @@ This method removes the template from the storage and cleans up the content part
 
 
 ```
-GET mms/<template_id>
+GET /mmsgw/v1/mms/<template_id>
 ```
 
 
@@ -135,7 +135,7 @@ This method returns a full descriptor of the template object requested, in a JSO
 
 
 ```
-POST mms/outbound/<template_id>
+POST /mmsgw/v1/mms/outbound/<template_id>
 ```
 
 
@@ -159,7 +159,7 @@ The POST method returns the full representation of a message object, as describe
 
 
 ```
-GET mms/[outbound|inbound]/<message_id>
+GET /mmsgw/v1/mms/[outbound|inbound]/<message_id>
 ```
 
 
@@ -202,7 +202,7 @@ The GET method returns the full representation of an outbound or an inbound mess
 
 
 ```
-POST mms/inbound/[ack|dr|rr]/<message_id>
+POST /mmsgw/v1/mms/inbound/[ack|dr|rr]/<message_id>
 ```
 
 
