@@ -16,10 +16,10 @@ def itworks():
 
 @bottle.get(URL_ROOT + "covfefe.png")
 def serve_covfefe():
-    return static_file("covfefe.png", root="")
+    return bottle.static_file("covfefe.png", root="")
 
 @bottle.get(URL_ROOT + "media/<id>")
 def serve_media(media_id):
-    return static_file("covfefe.png", root="")
+    return bottle.static_file("covfefe.png", root="")
 
 

@@ -42,7 +42,7 @@ def enqueue_outbound_mms(template_id):
     m.linked_id = mj.get('linked_id', "")
     pri = mj.get('priority', "").lower()
     m.priority = pri if pri in ACCEPTED_MESSAGE_PRIORITIES else "normal"
-    m.report_url = mj.get('report_url', "")
+    m.events_url = mj.get('events_url', "")
 
     m.nq(mj.get('gateway', DEFAULT_GATEWAY))
     m.save()
@@ -87,7 +87,7 @@ def enqueue_inbound_mms_event(event, rxid):
 # handle MM7 requests received from carrier side, could be MOs or events for MTs
 @bottle.post(URL_ROOT + "mms/inbound/<gw>")
 def mm7_inbound(gw):
-    raw_content = bottle.request.body.read()
+    raw_content = bottle.request.body.read().decode()
     log.info("[{}] request received, {} bytes".format(gw, bottle.request.headers['Content-Length']))
     log.debug("[{}] >>>> raw content: {}...".format(gw, raw_content[:4096]))
     if len(raw_content) > 4096:
@@ -327,6 +327,10 @@ class MMSMessage(object):
         return d
 
 
+    def __repr__(self):
+        return json.dumps(self.to_dict())
+
+
     @classmethod
     def crossref(cls, xref, msgid):
         rdb.hset("mms-" + msgid, 'provider_ref', xref)
@@ -334,21 +338,21 @@ class MMSMessage(object):
 
 
     def nq(self, gateway):
-        self.gateway = gateway
-        q_tx = rq.Queue("QTX-" + (gateway or DEFAULT_GATEWAY), connection=rdbq)
+        self.gateway = gateway or DEFAULT_GATEWAY
+        q_tx = rq.Queue("QTX-" + self.gateway, connection=rdbq)
         q_tx.enqueue_call(
             func='models.gateway.send_mms', args=( self.id, ), 
             job_id=self.id,
             meta={ 'retries': MAX_GW_RETRIES },
             ttl=30
         )
-        log.info("[{}] transmission {} queued for processing".format(gateway, self.id))
+        log.info("[] message {} queued for transmission on {}".format(self.id, self.gateway))
         self.set_state([], "SCHEDULED")
 
 
-    def set_state(self, dest, state, err="", desc="", gwid="", extra=None):
+    def set_state(self, dest, state, err="", desc="", gwid="", gw_url="", extra=None):
 
-        log.debug(">>>> gateway {} posting event {} for {}".format(gwid, state, self.id))
+        log.debug("[{}] {} registering event {}".format(gwid, self.id, state))
         s = {
             'state': state,
             'code': err,
@@ -357,7 +361,7 @@ class MMSMessage(object):
             'timestamp': int(time.time())
         }
         if extra:
-            pass
+            s['extra_data'] = extra
 
         s['destinations'] = dest if isinstance(dest, list) else [ dest ]
         if len(s['destinations']) == 0:
@@ -369,8 +373,9 @@ class MMSMessage(object):
         # callback to the app if necessary
         s['message'] = self.id
         q_cb = rq.Queue("QEV", connection=rdbq)
-#        url_list = self.events_url.split(",") + gw.events_url.split(",")
-#        for url in url_list:
-#            q_cb.enqueue_call("backend.util.cb_post", ( url, json.dumps(s), ))
+        url_list = set(self.events_url.split(",") + gw_url.split(","))
+        for url in url_list:
+            if url:
+                q_cb.enqueue_call("backend.util.cb_post", ( url, json.dumps(s), ))
 
 

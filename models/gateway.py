@@ -49,7 +49,7 @@ def send_mms(txid):
 
     # is this gateway healthy enough to execute the job?
     this_job = rq.get_current_job()
-    heartbeats_left = rdbq.get('gwstat-' + gw.gwid) 
+    heartbeats_left = int(rdbq.get('gwstat-' + gw.gwid))
     if heartbeats_left is None:
         # this shouldnt happen: if the heartbeat key is gone, the gateway instance is dead
         # (if it does happen, then it's just my bad logic)
@@ -72,15 +72,13 @@ def send_mms(txid):
                     src_addr = gw.origin_prefix + tx.origin + gw.origin_suffix
                     if "@" not in src_addr:
                         src_addr += "@" + gw.local_domain
-                    dest_addr = list(map(lambda a: 
-                        gw.dest_prefix + a + gw.dest_suffix + 
-                        (("@" + gw.remote_domain) if "@" not in gw.dest_suffix else "")
-                    , tx.destination | tx.cc | tx.bcc))
+                    dest_addr = list([gw.dest_prefix + a + gw.dest_suffix + 
+                        (("@" + gw.remote_domain) if "@" not in gw.dest_suffix else "") for a in tx.destination | tx.cc | tx.bcc])
                     ret_code, ret_desc = gw.send_to_mmsc(m, txid, src_addr, dest_addr)
                 else:
                     ret_code, ret_desc = gw.send_to_mmsc(m, txid)
                 if ret_code is None:
-                    tx.set_state([], "SENT", "", "", gw.gwid, ret_desc)
+                    tx.set_state([], "SENT", "", "", gw.gwid, gw.events_url, ret_desc)
                     return
                 else:
                     log.debug("[{}] {} transmission error {}: {}".format(gw.gwid, txid, ret_code, ret_desc))
@@ -90,8 +88,8 @@ def send_mms(txid):
             log.info("[{}] {} gateway error: {}".format(gw.gwid, txid, traceback.format_exc()))
             ret_code, ret_desc = "2", "internal error: {}".format(ex) 
 
-        tx.set_state([], "FAILED", ret_code, ret_desc, gw.gwid)
-        if len(ret_code) > 1:
+        tx.set_state([], "FAILED", ret_code, ret_desc, gw.gwid, gw.events_url)
+        if len(str(ret_code)) > 1:
             # only reschedule for external, environmental errors
             reschedule(this_job, gw.q_tx)
 
@@ -201,6 +199,7 @@ class MMSGateway(object):
     # outbound
     secure = False
     remote_peer = None       # SMTP remote server for MM4, as ( host, port ) tuple; MMSC URL for MM7
+    heartbeat = None         # smtp or http scheme (like HELO or HEAD) to generate a request to the remote host, and expected response code (like 200 or 401)
     local_host = None        # identification of the local server (fqdn) for MM4; URL to local for MM7
     auth = None              # authentiation to use for transmitting messages, as ( user, password ) tuple
     ssl_certificate = None   # ( keyfile, certfile ) tuple, MM4 only
@@ -245,7 +244,7 @@ class MMSGateway(object):
         self.events_url = cfg['gateway'].get('events_url', "")
 
         self.secure = cfg['outbound'].get('secure_connection', "").lower() in ("yes", "true", "t", "1")
-        self.remote_peer = [ cfg['outbound'].get('remote_host', "localhost"), 0 ]
+        self.heartbeat = cfg['outbound'].get('heartbeat')
         self.local_host = cfg['outbound'].get('local_host', "")
         if len(cfg['outbound'].get('username', "")) > 0 and len(cfg['outbound'].get('password', "")) > 0:
             self.auth = ( cfg['outbound']['username'], cfg['outbound']['password'] )
@@ -310,7 +309,11 @@ class MM4Gateway(MMSGateway):
 
     def config(self, cfg):
         super(MM4Gateway, self).config(cfg)
-        self.remote_peer[1] = int(cfg['outbound'].get('remote_port', (465 if self.secure else 25)))
+        try:
+            r = cfg['outbound'].get('remote_host', "localhost").split(":", 2)
+            self.remote_peer = ( r[0], int(r[1]) )
+        except (IndexError, ValueError):
+            self.remote_peer = ( r[0], (465 if self.secure else 25) )
         self.remote_domain = cfg['outbound'].get('remote_domain')
         self.local_domain = cfg['outbound'].get('local_domain')
         self.originator_addr = cfg['outbound'].get('originator_address')
@@ -354,7 +357,8 @@ class MM4Gateway(MMSGateway):
 
     def start(self):
         # start outbound gateway
-        rdbq.set('gwstat-' + self.gwid, 1, 3 + GW_HEARTBEAT_TIMER)
+        if self.heartbeat:
+            rdbq.set('gwstat-' + self.gwid, 1, 3 + GW_HEARTBEAT_TIMER)
         self.connect()
         # register the gateway to receive inbound messages
         rdbq.sadd('mmsrxsource-' + self.this_domain, self.gwid)
@@ -362,7 +366,7 @@ class MM4Gateway(MMSGateway):
         return self.connection is not None
 
 
-    def heartbeat(self):
+    def healthy(self):
         if rdbq.decr('gwstat-' + self.gwid) <= -1:
             # this gateway bleeded to death, we need to stop the app
             rdbq.delete('gwstat-' + self.gwid)
@@ -374,15 +378,16 @@ class MM4Gateway(MMSGateway):
                 # connection still didnt work, set gateway in an uncertain functional state
                 log.critical("[{}] Currently no connection to remote MMSC".format(self.gwid))
         try:
-            rp = self.connection.docmd("HELO", self.this_host)
-            if rp[0] == 250:
+            meth, _, expect = self.heartbeat.partition(" ")
+            rp = self.connection.docmd(meth or "HELO", self.this_host)
+            if str(rp[0]) in (expect, '250'):
                 rdbq.set('gwstat-' + self.gwid, GW_HEARTBEATS, 
                     ex=(GW_HEARTBEAT_TIMER * (2 + GW_HEARTBEATS))
                 )
                 log.debug("[{}] _/\_".format(self.gwid))
             else:
-                log.critical("[{}] Remote server didn't like our HELO: {}".format(self.gwid, rp))
-            return rp[0] == 250
+                log.critical("[{}] Remote server didn't like our {}: {}".format(self.gwid, meth, rp))
+            return str(rp[0]) in (expect, '250')
         except smtplib.SMTPException as se:
             log.critical("[{}] Gateway heartbeat failed: {}".format(self.gwid, se))
             if se.message.startswith("Connection unexpectedly closed"):
@@ -401,11 +406,11 @@ class MM4Gateway(MMSGateway):
         e['Sender'] = self.originator_addr
         e['Subject'] = tx.template.subject
         if len(tx.destination):
-            e['To'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.destination))
+            e['To'] = ",".join([self.dest_prefix + a + self.dest_suffix for a in tx.destination])
         if len(tx.cc):
-            e['Cc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.cc))
+            e['Cc'] = ",".join([self.dest_prefix + a + self.dest_suffix for a in tx.cc])
         if len(tx.bcc):
-            e['Bcc'] = ",".join(map(lambda a: self.dest_prefix + a + self.dest_suffix, tx.bcc))
+            e['Bcc'] = ",".join([self.dest_prefix + a + self.dest_suffix for a in tx.bcc])
         
         for pid in tx.template.parts:
             p = models.template.MMSMessagePart(pid)
@@ -418,11 +423,10 @@ class MM4Gateway(MMSGateway):
                 p.content_url.startswith("https://")
             ):
                 # download the media file, unless already exists
+                content = repo(TMP_MEDIA_DIR, tx.template.id + "-" + p.content_name)
                 if not os.path.exists(content):
-                    content = download_to_file(p.content_url, repo( 
-                        TMP_MEDIA_DIR, tx.template.id + "-" + p.content_name
-                    ))
-            else:
+                    content = download_to_file(p.content_url, content)
+            if not content:
                 log.warning("[{}] {} failed to obtain content at {} for part '{}' in message {}"
                     .format(self.gwid, tx.id, p.content_url, p.content_name, tx.template.id)
                 )
@@ -439,16 +443,16 @@ class MM4Gateway(MMSGateway):
                 elif p.content_type == "text/plain":
                     mp = MIMEText(content)
                 elif p.content_type.startswith("image/"):
-                    fh = open(content)
+                    fh = open(content, "rb")
                     mp = MIMEImage(fh.read())
                     fh.close()
                 elif p.content_type.startswith("audio/"):
-                    fh = open(content)
+                    fh = open(content, "rb")
                     mp = MIMEAudio(fh.read())
                     fh.close()
-            except Exception as e:
+            except Exception as exc:
                 log.warning("[{}] {} failed to create MIME part '{}' component for message {}: {}"
-                    .format(self.gwid, tx.id, p.content_name, tx.template.id, e)
+                    .format(self.gwid, tx.id, p.content_name, tx.template.id, exc)
                 )
                 mp = None
             if mp:
@@ -531,7 +535,7 @@ class MM4Gateway(MMSGateway):
     def _parse_address_list(self, cdl):
         return \
             () if cdl is None else \
-            list(map(lambda e: self._phone_num_from_address(e), cdl.split(",")))
+            list([self._phone_num_from_address(e) for e in cdl.split(",")])
 
 
     def process_inbound_mms(self, mid, m, _):
@@ -600,7 +604,7 @@ class MM4Gateway(MMSGateway):
 
         rx.template.save()
         rx.save()
-        rx.set_state([], "FORWARDED", "", "", self.gwid, {})
+        rx.set_state([], "FORWARDED", "", "", self.gwid, self.events_url)
         log.debug("[{}] {} prepared message {} and reception record; will parse content"
             .format(self.gwid, rx.id, rx.template.id)
         )
@@ -690,11 +694,11 @@ class MM4Gateway(MMSGateway):
             e.add_header('X-Mms-Status-Text', status_desc)
             if len(reporting_phone_num):
                 e.add_header('X-Mms-Request-Recipients', 
-                    ".".join(list(map(lambda a: self.dest_prefix + a + self.dest_suffix, reporting_phone_num)))
+                    ".".join(list([self.dest_prefix + a + self.dest_suffix for a in reporting_phone_num]))
                 )
             c, d = self.send_to_mmsc(e, rxid, self.originator_addr, rx.ack_at_addr)
             if c is None:
-                rx.set_state(reporting_phone_num, "ACKNOWLEDGED", status, status_desc, self.gwid)
+                rx.set_state(reporting_phone_num, "ACKNOWLEDGED", status, status_desc, self.gwid, self.events_url)
             else:
                 log.warning("[{}] {} Failed to reply with MO receipt ack onfirmation: {}"
                     .format(self.gwid, rxid, d)
@@ -739,7 +743,7 @@ class MM4Gateway(MMSGateway):
                 log.warning("[{}] {} Failed to reply with DR for MO: {}".format(self.gwid, rxid, d))
             else:
                 if rx:
-                    rx.set_state(rcpt, "DELIVERED", status, status_desc, self.gwid, {})
+                    rx.set_state(rcpt, "DELIVERED", status, status_desc, self.gwid, self.events_url)
 
 
     def send_rr_for_inbound(self, reporting_phone_num, msg_from_num, rxid, ref, rstatus, rstatus_desc=""):
@@ -776,7 +780,7 @@ class MM4Gateway(MMSGateway):
                 log.warning("[{}] {} Failed to reply with DLR for MO: {}".format(self.gwid, rxid, d))
             else:
                 if rx:
-                    rx.set_state(rcpt, "READ", rstatus, rstatus_desc, self.gwid, {})
+                    rx.set_state(rcpt, "READ", rstatus, rstatus_desc, self.gwid, self.events_url)
 
 
     def process_ack_for_outbound(self, em, __):
@@ -791,8 +795,11 @@ class MM4Gateway(MMSGateway):
             .format(self.gwid, txid, destinations, em['X-Mms-Request-Status-Code'], em['X-Mms-Status-Text'])
         )
         status = "ACKNOWLEDGED" if em['X-Mms-Request-Status-Code'].lower() == "ok" else "FAILED"
-        code = self.MEDIA_ERROR_MAP.keys()[self.MEDIA_ERROR_MAP.values().index(em['X-Mms-Request-Status-Code'])]
-        tx.set_state(destinations, status, code, em['X-Mms-Request-Status-Code'] + " " + em['X-Mms-Status-Text'], self.gwid)
+        code = list(self.MEDIA_ERROR_MAP.keys())[list(self.MEDIA_ERROR_MAP.values()).index(em['X-Mms-Request-Status-Code'])]
+        tx.set_state(
+            destinations, status, code, em['X-Mms-Request-Status-Code'] + " " + em['X-Mms-Status-Text'], 
+            self.gwid, self.events_url
+        )
 
 
     def process_dr_for_outbound(self, em, __):
@@ -808,10 +815,10 @@ class MM4Gateway(MMSGateway):
             "FORWARDED" if em['X-Mms-MM-Status-Code'].lower() in [ "deferred", "indeterminate", "forwarded" ] else \
             "FAILED" if em['X-Mms-MM-Status-Code'].lower() in [ "expired", "rejected", "unrecognised", "unrecognized" ] else \
             "UNDEFINED"
-        code = self.DR_STATUS_MAP.keys()[self.DR_STATUS_MAP.values().index(em['X-Mms-MM-Status-Code'])]
+        code = list(self.DR_STATUS_MAP.keys())[list(self.DR_STATUS_MAP.values()).index(em['X-Mms-MM-Status-Code'])]
         status_text = em['X-Mms-MM-Status-Code'] + " " + em['X-Mms-Status-Text'] + " " + em['X-Mms-MM-Status-Extension']
         send_to_ua = em['X-Mms-Forward-To-Originator-UA'].lower() == "yes" if em['X-Mms-Forward-To-Originator-UA'] else False 
-        tx.set_state(self._phone_num_from_address(em['To']), status, code, status_text, self.gwid,
+        tx.set_state(self._phone_num_from_address(em['To']), status, code, status_text, self.gwid, self.events_url,
             extra={
                 'send_to_UA': send_to_ua, 
                 'app': em['X-Mms-Applic-ID'], 
@@ -893,7 +900,7 @@ class MM7Gateway(MMSGateway):
 
     def config(self, cfg):
         super(MM7Gateway, self).config(cfg)
-        self.remote_peer[1] = int(cfg['outbound'].get('remote_port', 80 if self.secure else 443))
+        self.remote_peer = cfg['outbound'].get('remote_host', "http://localhost/" + URL_ROOT)
         self.originator_system = cfg['features'].get('originator_system')
         self.vaspid = cfg['gateway'].get('vaspid')
         self.vasid = cfg['gateway'].get('vasid')
@@ -905,31 +912,35 @@ class MM7Gateway(MMSGateway):
 
     def start(self):
         # start outbound gateway
-        rdbq.set('gwstat-' + self.gwid, 1, 3 + GW_HEARTBEAT_TIMER)
-        self.connection = self.remote_peer[0]
+        self.connection = self.remote_peer
+        if self.heartbeat:
+            rdbq.set('gwstat-' + self.gwid, 1, 3 + GW_HEARTBEAT_TIMER)
 #        # register the gateway to receive inbound messages
 #        rdbq.sadd('mmsrxsource-' + self.this_domain, self.gwid)
 #        rdbq.sadd('mmsrxsource-' + self.this_host, self.gwid)
         return True
 
 
-    def heartbeat(self):
+    def healthy(self):
         if rdbq.decr('gwstat-' + self.gwid) <= -1:
             # this gateway bleeded to death, we need to stop the app
             rdbq.delete('gwstat-' + self.gwid)
             return False
         try:
-            rp = requests.head(self.connection, auth=self.auth)
-            if rp.ok:
+            meth, _, expect = self.heartbeat.partition(" ")
+            rp = requests.request(meth or "HEAD", self.connection, 
+                headers={ 'Content-Length': "0" }, auth=self.auth, timeout=GW_HEARTBEAT_TIMER
+            )
+            if str(rp.status_code) in (expect, "200"):
                 rdbq.set('gwstat-' + self.gwid, GW_HEARTBEATS,
                     ex=(GW_HEARTBEAT_TIMER * (2 + GW_HEARTBEATS))
                 )
                 log.debug("[{}] _/\_".format(self.gwid))
             else:
-                log.critical("[{}] Remote server didn't responded {} to our HEAD request: {}"
-                    .format(self.gwid, rp.status_code)
+                log.critical("[{}] Remote server didn't responded to our {} request: {}"
+                    .format(self.gwid, meth, rp)
                 )
-            return rp.ok
+            return str(rp.status_code)
         except requests.RequestException as re:
             log.critical("[{}] Gateway heartbeat failed: {}".format(self.gwid, re))
             return False
@@ -1017,7 +1028,7 @@ class MM7Gateway(MMSGateway):
             'href': "cid:" + tx.id + ".content",
             'allowAdaptations': "true" if tx.template.content_adaptation == 1 else "false",
         })
-        env_str = '<?xml version="1.0"?>' + ET.tostring(env)
+        env_str = '<?xml version="1.0"?>' + ET.tostring(env).decode()
         log.debug("envelope: {}".format(env_str))
 
         top_part = MIMEMultipart('related', boundary=TOP_PART_BOUNDARY)
@@ -1043,11 +1054,10 @@ class MM7Gateway(MMSGateway):
                 p.content_url.startswith("https://")
             ):
                 # download the media file, unless already exists
+                content = repo(TMP_MEDIA_DIR, tx.template.id + "-" + p.content_name)
                 if not os.path.exists(content):
-                    content = download_to_file(p.content_url, repo(
-                        TMP_MEDIA_DIR, tx.template.id + "-" + p.content_name
-                    ))
-            else:
+                    content = download_to_file(p.content_url, content)
+            if not content:
                 log.warning("[{}] {} failed to obtain content for part '{}' in message {}"
                     .format(self.gwid, tx.id, p.content_name, tx.template.id)
                 )
@@ -1063,16 +1073,16 @@ class MM7Gateway(MMSGateway):
                 elif p.content_type == "text/plain":
                     mp = MIMEText(content)
                 elif p.content_type.startswith("image/"):
-                    fh = open(content)
+                    fh = open(content, "rb")
                     mp = MIMEImage(fh.read())
                     fh.close()
                 elif p.content_type.startswith("audio/"):
-                    fh = open(content)
+                    fh = open(content, "rb")
                     mp = MIMEAudio(fh.read())
                     fh.close()
-            except Exception as e:
+            except Exception as exc:
                 log.warning("[{}] {} failed to create MIME part '{}' component for message {}: {}"
-                    .format(self.gwid, tx.id, p.content_name, tx.template.id, e)
+                    .format(self.gwid, tx.id, p.content_name, tx.template.id, exc)
                 )
                 mp = None
             if mp:
@@ -1111,7 +1121,7 @@ class MM7Gateway(MMSGateway):
         if len(content) > 4096:
             log.debug("[{}] {} ... {}".format(self.gwid, msgid, content[-256:]))
         try:
-            rp = requests.post(self.remote_peer[0],
+            rp = requests.post(self.remote_peer,
                 auth=self.auth,
                 headers=headers,
                 data=content,
@@ -1166,7 +1176,7 @@ class MM7Gateway(MMSGateway):
         ET.SubElement(stat, "StatusText").text = MM7_STATUS[status]
         if msgid:
             ET.SubElement(rp, "MessageID").text = msgid
-        soap = '<?xml version="1.0" ?>' + ET.tostring(env)
+        soap = '<?xml version="1.0" ?>' + ET.tostring(env).decode()
         log.info("Prepared response: {}".format(soap))
         return soap
 
@@ -1229,7 +1239,7 @@ class MM7Gateway(MMSGateway):
 
         rx.template.save()
         rx.save()
-        rx.set_state([], "FORWARDED", "", "", self.gwid, {})
+        rx.set_state([], "FORWARDED", "", "", self.gwid, self.events_url)
         log.debug("[{}] {} prepared message {} and reception record; will parse content"
             .format(self.gwid, rx.id, rx.template.id)
         )

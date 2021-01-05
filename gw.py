@@ -11,9 +11,9 @@ from backend.storage import rdbq
 import models.gateway
 
 
-def heartbeat(gateway):
-    if gateway.heartbeat():
-        threading.Timer(GW_HEARTBEAT_TIMER, heartbeat, [ gateway ]).start()
+def hb(gateway):
+    if gateway.healthy():
+        threading.Timer(GW_HEARTBEAT_TIMER, hb, [ gateway ]).start()
     else:
         # the gateway has not been able to perform its intended operation for a while
         # we forcefully kill it, so it doesn't try to process jobs anymore
@@ -38,7 +38,7 @@ if gw_type == "MM4":
 elif gw_type == "MM7":
     gw = models.gateway.MM7Gateway(gwid)
 else:
-    print(sys.argv[len(sys.argv) - 1] + "Gateway protocol unsupported or missing; use MM4 or MM7.\n")
+    print((sys.argv[len(sys.argv) - 1] + "Gateway protocol unsupported or missing; use MM4 or MM7.\n"))
     exit()
 gw.config(cfg)
 if not gw.start():
@@ -48,9 +48,9 @@ if not gw.start():
 models.gateway.THIS_GW = gw
 
 burst = "-b" in sys.argv or "--burst" in sys.argv
-if not burst:
+if not burst and cfg['outbound'].get('heartbeat') is not None:
     log.debug("[{}] Setting up heartbeat".format(gwid))
-    heartbeat(gw)
+    hb(gw)
 
 with Connection(connection=rdbq):
     w = Worker(['QTX-' + gw_group, 'QRX-' + gw_group, 'QEV-' + gw_group], name=gwid)

@@ -8,7 +8,7 @@ import datetime
 import requests
 import os, sys
 if sys.version_info.major < 3:
-    from urllib import url2pathname
+    from urllib.request import url2pathname
 else:
     from urllib.request import url2pathname
 from backend.logger import log
@@ -24,7 +24,7 @@ def cb_post(url, jdata):
 
 
 class FileSchemeAdapter(requests.adapters.BaseAdapter):
-    # adapter to allow the requests to GET from a file:// url
+# adapter to allow the requests to GET from a file:// url
 
     @staticmethod
     def _chkpath(method, path):
@@ -83,7 +83,7 @@ def download_to_file(url, save_as=None):
 
 def find_in_dict(d, k):
     if k in d: return d[k]
-    for kk, v in d.items():
+    for kk, v in list(d.items()):
         if isinstance(v, dict):
             i = find_in_dict(v, k)
             if i is not None:
@@ -96,13 +96,14 @@ def repo(path, fn):
             os.mkdir(path + fn[:2])
         return path + fn[:2] + "/" + fn
     except Exception as e:
+        log.debug(">>>>>> {}".format(e))
         return None
 
 
 def makeset(val):
     if isinstance(val, list):
         return set(val)
-    elif isinstance(val, basestring):
+    elif isinstance(val, str):
         return set(val.split(","))
     return set()
 

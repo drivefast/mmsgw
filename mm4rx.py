@@ -43,7 +43,7 @@ def dispatch(content, sender, receivers, source=None):
     # move content as file to be processed
     fn = repo(cfg['general'].get('mm4rx_dir', "/tmp/rx/"), mm4rx_id + ".mm4")
     if cfg['general'].get('smtp_host'):
-        with open(fn, "w") as fh:
+        with open(fn, "wb") as fh:
             fh.write(content)
 
     # post a task for the gateway parser
@@ -80,10 +80,9 @@ class MaildirEventHandler(pyinotify.ProcessEvent):
             return
         # parse the file content to get the from and to addresses
         try:
-            with open(fn, "r") as fh:
-                raw_msg = fh.read()
-                msg = email.message_from_string(raw_msg)
-                dispatch(raw_msg,
+            with open(fn, "rb") as fh:
+                msg = email.message_from_binary_file(fh)
+                dispatch(fh.read(),
                     msg.get('from'), 
                     email.utils.getaddresses(msg.get_all('to')) 
                 )
@@ -97,7 +96,7 @@ class MaildirEventHandler(pyinotify.ProcessEvent):
 
 
 class MM4SMTPServer(SMTPServer):
-    def process_message(self, sender_host, from_addr, to_addr, data):
+    def process_message(self, sender_host, from_addr, to_addr, data, **kwargs):
         return dispatch(data, from_addr, to_addr, sender_host)
 
 

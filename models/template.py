@@ -30,9 +30,13 @@ def create_mms_template():
     if type(td.get('show_sender')) == bool:
         t.show_sender = 1 if td['show_sender'] else 0
     t.subject = td.get('subject', "")
-    t.earliest_delivery = td.get('earliest_delivery', 0)
-    t.expire_after = td.get('expire_after', 0)
-    t.deliver_latest = td.get('deliver_latest', 0)
+    try:
+        t.earliest_delivery = int(td.get('earliest_delivery', 0))
+        t.latest_delivery = int(td.get('latest_delivery', 0))
+        t.expire_after = int(td.get('expire_after', 0))
+    except ValueError:
+        json_error(400, "Bad request", "one of the timer parameters (earliest_delivery, latest_delivery, expire_after) is invalid, must be integer or epoch")
+        return
     t.message_class = td.get('message_class', "") if td.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
     t.content_class = td.get('content_class', "") if td.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
     t.charged_party = td.get('charged_party', "") if td.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY else ""
@@ -64,7 +68,7 @@ def create_mms_template():
                 t.parts.insert(0, p.part_id)
             else:
                 t.parts.append(p.part_id)
-        elif isinstance(pd, basestring) and rdb.exists("mmspart-" + pd):
+        elif isinstance(pd, str) and rdb.exists("mmspart-" + pd):
             t.parts.append(pd)
 
     t.save()
@@ -93,12 +97,16 @@ def update_mms_template(tplid):
             t.show_sender = 1 if td['show_sender'] else 0
         if td.get('subject'):
             t.subject = td['subject']
-        if td.get('earliest_delivery'):
-            t.earliest_delivery = td['earliest_delivery']
-        if td.get('expire_after'):
-            t.expire_after = td['expire_after']
-        if td.get('deliver_latest'):
-            t.deliver_latest = td['deliver_latest'] 
+        try:
+            if td.get('earliest_delivery'):
+                t.earliest_delivery = int(td['earliest_delivery'])
+            if td.get('latest_delivery'):
+                t.latest_delivery = int(td['latest_delivery'])
+            if td.get('expire_after'):
+                t.expire_after = int(td['expire_after'])
+        except ValueError:
+            json_error(400, "Bad request", "one of the timer parameters (earliest_delivery, latest_delivery, expire_after) is invalid, must be integer or epoch")
+            return
         if td.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES:
             t.message_class = td['message_class'].lower()
         if td.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES:
@@ -136,7 +144,7 @@ def update_mms_template(tplid):
                     t.parts.insert(0, p.part_id)
                 else:
                     t.parts.append(p.part_id)
-            elif isinstance(pd, basestring) and rdb.exists("mmspart-" + pd):
+            elif isinstance(pd, str) and rdb.exists("mmspart-" + pd):
                 t.parts.append(pd)
 
         t.save()
@@ -179,8 +187,8 @@ class MMSMessageTemplate(object):
     show_sender = 0
     subject = ""
     earliest_delivery = 0
+    latest_delivery = 0
     expire_after = 0
-    deliver_latest = 0
     charged_party = ""
     message_class = ""
     content_class = ""
@@ -203,8 +211,8 @@ class MMSMessageTemplate(object):
             'show_sender': self.show_sender,
             'subject': self.subject,
             'earliest_delivery': self.earliest_delivery,
+            'latest_delivery': self.latest_delivery,
             'expire_after': self.expire_after,
-            'deliver_latest': self.deliver_latest,
             'charged_party': self.charged_party,
             'message_class': self.message_class,
             'content_class': self.content_class,
@@ -221,17 +229,17 @@ class MMSMessageTemplate(object):
         if tpl:
             self.id = tplid
             self.origin = tpl.get('origin', "")
-            self.show_sender = tpl.get('show_sender', -1)
+            self.show_sender = int(tpl.get('show_sender', -1))
             self.subject = tpl.get('subject', "")
-            self.earliest_delivery = tpl.get('earliest_delivery', 0)
-            self.expire_after = tpl.get('expire_after', 0)
-            self.deliver_latest = tpl.get('deliver_latest', 0)
+            self.earliest_delivery = int(tpl.get('earliest_delivery', 0))
+            self.latest_delivery = int(tpl.get('latest_delivery', 0))
+            self.expire_after = int(tpl.get('expire_after', 0))
             self.charged_party = tpl.get('charged_party', "")
             self.message_class = tpl.get('message_class', "")
             self.content_class = tpl.get('content_class', "")
-            self.drm = tpl.get('drm', -1)
-            self.content_adaptation = tpl.get('content_adaptation', -1)
-            self.can_redistribute = tpl.get('can_redistribute', -1)
+            self.drm = int(tpl.get('drm', -1))
+            self.content_adaptation = int(tpl.get('content_adaptation', -1))
+            self.can_redistribute = int(tpl.get('can_redistribute', -1))
             self.parts = tpl.get('parts', "").split(",")
 
     def as_email(self):
@@ -253,8 +261,8 @@ class MMSMessageTemplate(object):
             ret['show_sender'] = True
         if self.earliest_delivery:
             ret['earliest_delivery'] = self.earliest_delivery
-        if self.deliver_latest:
-            ret['deliver_latest'] = self.deliver_latest
+        if self.latest_delivery:
+            ret['latest_delivery'] = self.latest_delivery
         if self.expire_after:
             ret['expire_after'] = self.expire_after
         if self.charged_party:
@@ -281,9 +289,12 @@ class MMSMessageTemplate(object):
                 ret['parts'].append(p.as_dict())
         return ret
 
+    def __repr__(self):
+        return json.dumps(self.as_dict())
+
     def add_part_from_mime(self, ep, url_prefix=None):
         p = MMSMessagePart()
-        p.content_name = ep['Content-Id'] if "Content-Id" in ep else p.id
+        p.content_name = ep['Content-Id'] if "Content-Id" in ep else p.part_id
         p.content_type = ep.get_content_type()
         if p.content_type not in ACCEPTED_CONTENT_TYPES:
             return '406', "Content type '{}' not accepted".format(ep['Content-Type'])
@@ -356,4 +367,7 @@ class MMSMessagePart(object):
             'content_name': self.content_name,
             'content_type': self.content_type,
         }
+
+    def __repr__(self):
+        return json.dumps(self.as_dict())
 

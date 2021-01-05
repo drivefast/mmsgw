@@ -6,8 +6,8 @@ from backend.logger import log
 
 # this is the endpoint where your application receives transaction-related events
 # the events_url setting in the gateway configuration would be handled here
-@bottle.post(URL_ROOT + "example/mmsevent")
-def mmsevent():
+@bottle.post(URL_ROOT + "example/mms_event")
+def mms_event():
     ev = bottle.request.json
     log.debug(">>>> example application received new message event: {}".format(ev))
     return {'type': "event"}
@@ -16,7 +16,7 @@ def mmsevent():
 # this is the endpoint where your application receives notifications for incoming MOs
 # the mms_received_url setting in the gateway configuration would be handled here
 @bottle.post(URL_ROOT + "example/mms_received")
-def mmsmo():
+def mms_received():
     m = bottle.request.json
     log.debug(">>>> example application received new message: {}".format(m))
     log.debug(">>>> id {} gateway '{}' from {} to {}: {}".format(
@@ -38,31 +38,36 @@ def mmsmo():
 
 #    if m['ack_requested']:
     if True:
-        # we need to call the gateway and have it send an ACK for the received message 
-        # to its peer
+    # we need to call the gateway and have it send an ACK for the received message 
+    # to its peer
 
         # TODO: make your decision on whether you accept or reject the incoming MO, based on 
-        #     whatever criteria you cere for: destinaton numbers, message content and size, etc
+        #     whatever criteria you care for: destinaton numbers, message content and size, etc
         # your acknowledgement does not have to be synchronous - you may queue it as a task
         #     and send it at a later time
 
         # once you decided on the destinations that are acceptable and the ones that are not,
-        # send an http request back to the gateway to ack or send errors accordingly
+        # have the gateway send an http request back to the network if you wanna ack, or send 
+        # appropriate errors
         # use the applies_to parameter to bundle up destinations that the ACK/nACK commonly 
         # applies to, or dont provide it at all if the status applies to all
+
+        ack_for_numbers = [ "18005551212", "18005551234" ]
+        status = "200"; description = "Ok"
         rp = requests.post(MMSGW_URL + "mms/inbound/ack/" + m['id'], json={
-            "gateway": m['gateway'],     # the gateway that this message needs to be sent thru
-            "message": m['id'], # our own message ID
-            "event_for": m['ack_at_addr'], # the address to send the event to
+            "gateway": m['gateway'],        # the gateway that this message needs to be sent thru
+            "message": m['id'],             # our own message ID
+            "event_for": m['ack_at_addr'],  # the address to send the event to
             "provider_ref": m['provider_ref'], # provider's original id (X-Mms-Message-Id)
-            "status": "200", # canonical status id
-            "description": "Ok", # verbose description of the status
-            #"applies_to": [] # phone number(s) this status applies to; missing means applies to all
+            "status": status,               # canonical status id
+            "description": description,     # verbose description of the status
+            #"applies_to": ack_for_numbers  # phone number(s) this status applies to, missing means all
         })
         log.debug(">>>> POST request status {}".format(rp.status_code))
         # TODO: add error handling
 
     if m['dr_requested']:
+    # tell the gateway to transmit a delivery request signal to the network
 
         # TODO:for each number on the destination list, inform the gateway whether the delivery 
         #     was successful or it failed, so that this is eventually reported to the sender

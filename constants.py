@@ -39,7 +39,15 @@ API_DEV_PORT = int(cfg['general'].get('api_dev_port', 8080))
 TMP_MEDIA_DIR = cfg['general'].get("media_dir", "/tmp/media/")
 if not TMP_MEDIA_DIR.endswith("/"):
     TMP_MEDIA_DIR += "/"
+if not os.path.isdir(TMP_MEDIA_DIR):
+    os.mkdir(TMP_MEDIA_DIR)
+    os.chmod(TMP_MEDIA_DIR, int("770", 8))
 MM7RX_DIR = cfg['general'].get("mm7rx_dir", "/tmp/rx/")
+if not MM7RX_DIR.endswith("/"):
+    MM7RX_DIR += "/"
+if not os.path.isdir(MM7RX_DIR):
+    os.mkdir(MM7RX_DIR)
+    os.chmod(MM7RX_DIR, int("770", 8))
 
 MMS_TTL = int(cfg['general'].get('mms_ttl', 4 * 3600))
 MMS_TEMPLATE_TTL = int(cfg['general'].get('mms_template_ttl', 24 * 3600))
