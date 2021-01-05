@@ -80,7 +80,7 @@ This section details the interface offered by `mmsgw`, facing the application si
 
 
 ```
-POST /mms
+POST /mmsgw/v1/mms
 ```
 
 
@@ -111,7 +111,7 @@ On success, <code>mmsgw</code> replies with a full description of the template o
 
 
 ```
-PUT mms/<template_id>
+PUT /mmsgw/v1/mms/<template_id>
 ```
 
 
@@ -119,7 +119,7 @@ This method is provided to replace parameter values of an existing. The paramete
 
 
 ```
-DELETE mms/<template_id>
+DELETE /mmsgw/v1/mms/<template_id>
 ```
 
 
@@ -127,7 +127,7 @@ This method removes the template from the storage and cleans up the content part
 
 
 ```
-GET mms/<template_id>
+GET /mmsgw/v1/mms/<template_id>
 ```
 
 
@@ -135,7 +135,7 @@ This method returns a full descriptor of the template object requested, in a JSO
 
 
 ```
-POST mms/outbound/<template_id>
+POST /mmsgw/v1/mms/outbound/<template_id>
 ```
 
 
@@ -149,7 +149,7 @@ This method builds a message from the template requested, and enqueues it to be 
 *   <strong><code>gateway</code></strong> (string): the name of the gateway that this message needs to go out thru, which is one of the "<code>group</code>" names of the active gateways (e.g. if you have <code>GW01</code>, <code>GW02</code> and <code>GW03</code> as defined gateway instances, and the first two are both configured as part of the "<code>PROV-1</code>" group, use "<code>PROV-1</code>" as a value of this API parameter, and one of GW01 or GW02 will transmit your message); there is a default gateway parameter defined in the <code>mmsgw</code> settings, that will be adopted if this parameter is missing 
 *   <strong><code>priority</code></strong> (string, see constants.py file for acceptable values): the value indicates how this message needs to be prioritized by the providers in the network; <code>mmsgw</code> takes no action regarding this parameter, it will always add the messages at the end of the queue, because it relies on the application to schedule the messages in the desired order; check with your provider regarding the effectiveness of this parameter
 *   <strong><code>linked_id</code></strong> (string): an optional parameter used by some applications to mark related message sequences; it propagates in the network together with the message
-*   <strong><code>report_url</code></strong> (string): all the events received for this particular message will generate a POST request to this URL, with a JSON description of the event; this is what is commonly known as a "hook", or "callback" into the application
+*   <strong><code>events_url</code></strong> (string or comma-separated list): all the events received for this particular message will generate a POST request to this URL, with a JSON description of the event; this is what is commonly known as a "hook", or "callback" into the application; this comes in addition to other URLs defined in the gateway configuration
 
 <em>Note:</em> At least one phone number must be specified in one of the 3 lists above, otherwise the message will not be sent. 
 
@@ -159,7 +159,7 @@ The POST method returns the full representation of a message object, as describe
 
 
 ```
-GET mms/[outbound|inbound]/<message_id>
+GET /mmsgw/v1/mms/[outbound|inbound]/<message_id>
 ```
 
 
@@ -202,7 +202,7 @@ The GET method returns the full representation of an outbound or an inbound mess
 
 
 ```
-POST mms/inbound/[ack|dr|rr]/<message_id>
+POST /mmsgw/v1/mms/inbound/[ack|dr|rr]/<message_id>
 ```
 
 
