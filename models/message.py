@@ -133,8 +133,10 @@ def mm7_inbound(gw):
         rx.direction = 1
         log.debug("[{}] {} Incoming message {} is an MO".format(gw, rx.id, transaction_id))
         rx.save()
+        rx.template.save()
         # save raw content
         fn = repo(MM7RX_DIR, rx.id + ".mm7")
+        log.debug("[{}] {} saving media as {}".format(gw, rx.id, transaction_id, fn))
         with open(fn, "w") as fh:
             fh.write(parts[1].as_string())
         # schedule message for processing
@@ -328,7 +330,7 @@ class MMSMessage(object):
 
 
     def __repr__(self):
-        return json.dumps(self.to_dict())
+        return json.dumps(self.as_dict())
 
 
     @classmethod

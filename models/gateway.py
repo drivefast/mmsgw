@@ -2,6 +2,7 @@ import os.path
 import shutil
 import time
 import datetime
+import iso8601
 import uuid
 import base64
 import json
@@ -888,8 +889,6 @@ class MM7Gateway(MMSGateway):
     originator_system = None
     vaspid = None
     vasid = None
-    verify_vasid = ""
-    verify_vaspid = ""
     service_code = None
     peer_timeout = 10
 
@@ -901,13 +900,10 @@ class MM7Gateway(MMSGateway):
     def config(self, cfg):
         super(MM7Gateway, self).config(cfg)
         self.remote_peer = cfg['outbound'].get('remote_host', "http://localhost/" + URL_ROOT)
-        self.originator_system = cfg['features'].get('originator_system')
         self.vaspid = cfg['gateway'].get('vaspid')
         self.vasid = cfg['gateway'].get('vasid')
         self.service_code = cfg['gateway'].get('service_code')
         self.peer_timeout = cfg['outbound'].get('timeout', 10.)
-        self.vaspid = cfg['inbound'].get('verify_vaspid', "")
-        self.vasid = cfg['inbound'].get('verify_vasid', "")
 
 
     def start(self):
@@ -1181,78 +1177,77 @@ class MM7Gateway(MMSGateway):
         return soap
 
 
-    def process_inbound_mms(self, mid, content, meta):
-        ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
+    def _parse_address_list(self, address):
+        nums = []
+        if address is not None:
+            ns = address.tag[address.tag.find("{"):address.tag.find("}")+1]
+            for t in address:
+                if t.tag in [ ns + "Number", ns + "Shortcode", ns + "RFC2822Address" ]:
+                    nums.append(t.text.split("@")[0].replace("+", ""))
+        return nums
 
-#MMSRelayServerID -> rx.relay_server 
-#LinkedID -> rx.linked_id
-#Sender
-#Recipients 
-#TimeStamp
-#ReplyChargingID -> rx.reply_charging_id 
-#Priority
-#Subject
-#Content-Type
-#UACapabilities -> rx.ua_caps
-#ApplicID
-#ReplyApplicID
-#AuxApplicInfo
-#Content
+
+    def process_inbound_mms(self, mid, content, meta):
+    # processing an inbound message (MO)
+    #     mid = message ID, assigned by our MM7 API
+    #     content = multipart content containing smil, media, etc
+    #     meta = <body> part of the SOAP envelope, as an XML ElementTree object
 
         rx = models.message.MMSMessage(mid)
         if rx.id is None:
-            log.warning("[{}] {} Incoming MM7 message missing header, regenerating".format(self.gwid, mid))
+            log.warning("[{}] {} Incoming MM7 message missing header, generating new one".format(self.gwid, mid))
             rx = models.message.MMSMessage()
             rx.direction = 1
             rx.save()
         rx.gateway_id = self.gwid
         rx.gateway = self.group
-        log.debug("[{}] {} creating MO from {} to {}".format(self.gwid, rx.id, m['From'], m['To']))
+        rx.processed_ts = int(time.time())
+        log.debug(">>>> message object: {}".format(rx))
 
-        rx.vasid = meta.findtext("./" + ns + "VASID", "")
-        rx.vaspid = meta.findtext("./" + ns + "VASPID", "")
-        if rx.vasid != gw.verify_vasid or rx.vaspid != gw.verify_vaspid:
-            log.warning("[{}] {} MO rejected, does not verify VASID or VASPID (received '{}', '{}')"
-                .format(self.gwid, mid, rx.vasid, rx.vaspid)
-            )
-            return
+        ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
 
-        rx.origin = rx.template.origin = self._phone_num_from_address(m['From'])
-        rx.destination = set(self._parse_address_list(m['To']))
-        rx.cc = set(self._parse_address_list(m['Cc']))
-        rx.bcc = set(self._parse_address_list(m['Bcc']))
         try:
-            rx.created_ts = email.utils.mktime_tz(email.utils.parsedate_tz(m['Date']))
+            rx.origin = rx.template.origin = self._parse_address_list(meta.find("./" + ns + "Sender"))[0]
+        except Exception:
+            log.warning("[{}] {} Cannot parse message origination number".format(self.gwid, rx.id))
+        rx.destination = set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "To")))
+        rx.cc = set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Cc")))
+        rx.bcc = set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Bcc")))
+        log.debug("[{}] {} creating MO from {} to {}".format(self.gwid, rx.id, rx.origin, rx.destination))
+
+        rx.template.subject = meta.findtext("./" + ns + "Subject", "")
+        try:
+            rx.created_ts = int(iso8601.parse_date(meta.findtext("./" + ns + "TimeStamp", "")).timestamp())
         except Exception:
             rx.created_ts = int(time.time())
-            log.warning("[{}] {} Cannot parse timestamp of message '{}'; replacing with current timestamp"
-                .format(self.gwid, rx.id, m['X-Mms-Expiry'])
+            log.warning("[{}] {} Cannot parse timestamp of message; replacing with current timestamp"
+                .format(self.gwid, rx.id)
             )
-        rx.processed_ts = int(time.time())
-        rx.template.subject = m.get('Subject', "")
 
-        rx.priority = m['X-Mms-Priority'] or ""
+#        rx.vasid = meta.findtext("./" + ns + "VASID", "")
+#        rx.vaspid = meta.findtext("./" + ns + "VASPID", "")
+        rx.priority = meta.findtext("./" + ns + "Priority", "")
+        rx.linked_id = meta.findtext("./" + ns + "LinkedID", "")
+        rx.relay_server = meta.findtext("./" + ns + "MMSRelayServerID", "")
+        rx.reply_charging_id = meta.findtext("./" + ns + "ReplyChargingID", "")
+        rx.ua_caps = meta.findtext("./" + ns + "UACapabilities", "")
+        rx.handling_app = meta.findtext("./" + ns + "ApplicID", "")
+        rx.reply_to_app = meta.findtext("./" + ns + "ReplyApplicID", "")
+        rx.app_info = meta.findtext("./" + ns + "AuxApplicInfo", "")
 
-        rx.handling_app = m['X-Mms-Applic-ID'] or ""
-        rx.reply_to_app = m['X-Mms-Reply-Applic-ID'] or ""
-        rx.app_info = m['X-Mms-Aux-Applic-Info'] or ""
+        log.debug(">>>> template: {}".format(rx.template))
 
         rx.template.save()
         rx.save()
-        rx.set_state([], "FORWARDED", "", "", self.gwid, self.events_url)
-        log.debug("[{}] {} prepared message {} and reception record; will parse content"
-            .format(self.gwid, rx.id, rx.template.id)
-        )
 
-        # parse content parts
         try:
-            if m.is_multipart():
-                mime_parts = m.get_payload()
+            if content.is_multipart():
+                mime_parts = content.get_payload()
                 log.debug("[{}] {} Handling content as multipart, {} parts"
                     .format(self.gwid, rx.id, len(mime_parts))
                 )
             else:
-                mime_parts = [ m ]
+                mime_parts = [ content ]
             for mp in mime_parts:
                 if mp.is_multipart():
                     ret_code = '400'
@@ -1280,27 +1275,13 @@ class MM7Gateway(MMSGateway):
             ret_code = '500'
             ret_desc = "Error processing message MIME parts"
 
-        if 'X-Mms-Ack-Request' in m and m['X-Mms-Ack-Request'].lower() == "yes":
-            # sender requested to send them an ack
-            if ret_code != "Ok" or self.auto_ack:
-                # if we have an error already, or the auto-ack is set, we send the MM4_forward.RES 
-                # right away; otherwise we count on the handling app to schedule the ack
-                self.send_inbound_ack(rx.id, ret_code, ret_desc)
-            else:
-                rx.ack_requested = True
-
-        if ret_code == "Ok" and str(m['X-Mms-Delivery-Report']).lower() == "yes":
-            # sender requested to send them DLR
-            if self.auto_dr:
-                self.send_inbound_dr(all_recipients, rx.origin, rx.id,
-                    "200", "Assume retrieved; downstream provides no delivery information"
-                )
-            else:
-                rx.dr_requested = True
-
-        rx.rr_requested = m['X-Mms-Read-Reply'] is not None and (m['X-Mms-Read-Reply'].lower() == "yes")
-
+        rx.template.save()
         rx.save()
+
+        rx.set_state([], "RECEIVED", "", "", self.gwid, self.events_url)
+        log.debug("[{}] {} prepared message and reception record; will parse content"
+            .format(self.gwid, rx.id)
+        )
 
         if self.mms_received_url:
             # let downstream application know that we received an MO
@@ -1313,28 +1294,28 @@ class MM7Gateway(MMSGateway):
 
 
 
-        if not content.is_multipart():
-            m = content.get_payload(decode=True)
-            log.info("Media: {} size {}".format(
-                content.get_content_type(),
-                content.get("Content-Length", "unknown")
-            ))
-            if bad_media:
-                status = '2004'
-        else:
-            one_bad = False; all_bad = False
-            media_parts = content.get_payload()
-            for mp in media_parts:
-                bad_media = False
-                m = mp.get_payload(decode=True)
-                log.info("Media: {} size {}".format(
-                    mp.get_content_type(),
-                    mp.get("Content-Length", "unknown")
-                ))
-                one_bad = one_bad or bad_media
-                all_bad = all_bad and bad_media
-            if one_bad: status = '1100'
-            if all_bad: status = '2004'
+#        if not content.is_multipart():
+#            m = content.get_payload(decode=True)
+#            log.info("Media: {} size {}".format(
+#                content.get_content_type(),
+#                content.get("Content-Length", "unknown")
+#            ))
+#            if bad_media:
+#                status = '2004'
+#        else:
+#            one_bad = False; all_bad = False
+#            media_parts = content.get_payload()
+#            for mp in media_parts:
+#                bad_media = False
+#                m = mp.get_payload(decode=True)
+#                log.info("Media: {} size {}".format(
+#                    mp.get_content_type(),
+#                    mp.get("Content-Length", "unknown")
+#                ))
+#                one_bad = one_bad or bad_media
+#                all_bad = all_bad and bad_media
+#            if one_bad: status = '1100'
+#            if all_bad: status = '2004'
 
 
 
