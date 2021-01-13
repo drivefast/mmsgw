@@ -105,6 +105,7 @@ def inbound(content_fn, meta_xml=None):
         'mm4_read_reply_report.req': "OUTBOUND_RR",
     }
     MM7_TYPE = {
+        'submitreq': "INBOUND_MMS",
         'deliverreq': "INBOUND_MMS",
         'deliveryreportreq': "OUTBOUND_DR",
         'readreplyreq': "OUTBOUND_RR",
@@ -1202,7 +1203,6 @@ class MM7Gateway(MMSGateway):
         rx.gateway_id = self.gwid
         rx.gateway = self.group
         rx.processed_ts = int(time.time())
-        log.debug(">>>> message object: {}".format(rx))
 
         ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
 
@@ -1234,8 +1234,6 @@ class MM7Gateway(MMSGateway):
         rx.handling_app = meta.findtext("./" + ns + "ApplicID", "")
         rx.reply_to_app = meta.findtext("./" + ns + "ReplyApplicID", "")
         rx.app_info = meta.findtext("./" + ns + "AuxApplicInfo", "")
-
-        log.debug(">>>> template: {}".format(rx.template))
 
         rx.template.save()
         rx.save()
@@ -1290,33 +1288,6 @@ class MM7Gateway(MMSGateway):
             log.debug("[{}] {} posted MO to {} as job {}"
                 .format(self.gwid, rx.id, self.mms_received_url, j.id)
             )
-
-
-
-
-#        if not content.is_multipart():
-#            m = content.get_payload(decode=True)
-#            log.info("Media: {} size {}".format(
-#                content.get_content_type(),
-#                content.get("Content-Length", "unknown")
-#            ))
-#            if bad_media:
-#                status = '2004'
-#        else:
-#            one_bad = False; all_bad = False
-#            media_parts = content.get_payload()
-#            for mp in media_parts:
-#                bad_media = False
-#                m = mp.get_payload(decode=True)
-#                log.info("Media: {} size {}".format(
-#                    mp.get_content_type(),
-#                    mp.get("Content-Length", "unknown")
-#                ))
-#                one_bad = one_bad or bad_media
-#                all_bad = all_bad and bad_media
-#            if one_bad: status = '1100'
-#            if all_bad: status = '2004'
-
 
 
     def process_dr_for_outbound(self, _, meta):

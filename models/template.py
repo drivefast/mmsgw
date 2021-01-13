@@ -35,8 +35,9 @@ def create_mms_template():
         t.latest_delivery = int(td.get('latest_delivery', 0))
         t.expire_after = int(td.get('expire_after', 0))
     except ValueError:
-        json_error(400, "Bad request", "one of the timer parameters (earliest_delivery, latest_delivery, expire_after) is invalid, must be integer or epoch")
-        return
+        return json_error(400, "Bad request", 
+            "One of the timer parameters (earliest_delivery, latest_delivery, expire_after) is invalid, must be integer or epoch"
+        )
     t.message_class = td.get('message_class', "") if td.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES else ""
     t.content_class = td.get('content_class', "") if td.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES else ""
     t.charged_party = td.get('charged_party', "") if td.get('charged_party', "").lower() in ACCEPTED_CHARGED_PARTY else ""
@@ -105,8 +106,9 @@ def update_mms_template(tplid):
             if td.get('expire_after'):
                 t.expire_after = int(td['expire_after'])
         except ValueError:
-            json_error(400, "Bad request", "one of the timer parameters (earliest_delivery, latest_delivery, expire_after) is invalid, must be integer or epoch")
-            return
+            return json_error(400, "Bad request", 
+                "One of the timer parameters (earliest_delivery, latest_delivery, expire_after) is invalid, must be integer or epoch"
+            )
         if td.get('message_class', "").lower() in ACCEPTED_MESSAGE_CLASSES:
             t.message_class = td['message_class'].lower()
         if td.get('content_class', "").lower() in ACCEPTED_CONTENT_CLASSES:
@@ -150,7 +152,7 @@ def update_mms_template(tplid):
         t.save()
         return m.as_dict()
     else:
-        json_error(404, "Not found", "MMS message '{}' not found".format(tplid))
+        return json_error(404, "Not found", "MMS message '{}' not found".format(tplid))
 
 
 @bottle.get(URL_ROOT + "mms_part/<partid>")

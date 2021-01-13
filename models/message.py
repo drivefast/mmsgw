@@ -12,7 +12,7 @@ import traceback
 from constants import *
 from backend.logger import log
 from backend.storage import rdb, rdbq
-from backend.util import makeset, repo
+from backend.util import makeset, repo, json_error
 import models.template
 import models.gateway
 
@@ -22,13 +22,15 @@ import models.gateway
 def get_mms(msgid):
     m = MMSMessage(msgid)
     return m.as_dict() if m.id else \
-        json_error(404, "Not found", "MMS message transaction {} not found".format(msgid))
+        json_error(404, "Not found", "MMS message {} not found".format(msgid))
 
 
 @bottle.post(URL_ROOT + "mms/outbound/<template_id>")
 def enqueue_outbound_mms(template_id):
     mj = bottle.request.json
     m = MMSMessage(template_id=template_id)
+    if m.template.id is None:
+        return json_error(404, "Not found", "Message template {} not found".format(template_id))
 
     m.direction = -1
     m.origin = mj.get("origin", m.template.origin)
@@ -68,7 +70,7 @@ def enqueue_inbound_mms_event(event, rxid):
         (event != "ack" and ev.get('event_for') is None) or \
         (event != "ack" and ev.get('applies_to') is None) \
     :
-        json_error(400, "Bad Request", "Missing required parameter")
+        return json_error(400, "Bad Request", "Missing required parameter")
 
     nums = list(ev.get('applies_to', ""))
 
@@ -87,8 +89,11 @@ def enqueue_inbound_mms_event(event, rxid):
 # handle MM7 requests received from carrier side, could be MOs or events for MTs
 @bottle.post(URL_ROOT + "mms/inbound/<gw>")
 def mm7_inbound(gw):
-    raw_content = bottle.request.body.read().decode()
     log.info("[{}] request received, {} bytes".format(gw, bottle.request.headers['Content-Length']))
+    raw_content = bottle.request.body.read().decode()
+    log.debug("[{}] request headers: {}".format(gw, 
+        ["{}: {}".format(h, bottle.request.headers.get(h)) for h in bottle.request.headers.keys()] 
+    ))
     log.debug("[{}] >>>> raw content: {}...".format(gw, raw_content[:4096]))
     if len(raw_content) > 4096:
         log.debug("[{}] >>>> ... {}".format(gw, raw_content[-256:]))
@@ -102,7 +107,7 @@ def mm7_inbound(gw):
         if m.is_multipart():
             parts = m.get_payload()
             log.debug("[{}] handling as multipart, {} parts".format(gw, len(parts)))
-            env_content = parts[0].get_payload(decode=True)
+            env_content = parts[0].get_payload(decode=True).decode()
             log.debug("[{}] SOAP envelope: {}".format(gw, env_content))
             env = ET.fromstring(env_content)
         else:
@@ -113,19 +118,23 @@ def mm7_inbound(gw):
         return bottle.HTTPResponse(status=400, body="Failed to xml-parse the SOAP envelope")
 
     # get the transaction tag, treat it as unique ID of the incoming message
-    transaction_tag = env.find(
-        "./{" + MM7_NAMESPACE['env'] + "}Header/{" + MM7_NAMESPACE['mm7'] + "}TransactionID"
-    , MM7_NAMESPACE)
-    if transaction_tag is None:
+    env_ns = "{" + MM7_NAMESPACE['env'] + "}"
+    transaction_id = None
+    t_header = env.find("./" + env_ns + "Header") or []
+    for t in t_header:
+        if t.tag.endswith("TransactionID"):
+            transaction_id = t.text.strip()
+            mm7_ns = t.tag.replace("TransactionID", "")
+            break
+    if transaction_id is None:
         s = "SOAP envelope of received request invalid, at least missing a transaction ID"
         log.warning("[{}] {}".format(gw, s))
         return bottle.HTTPResponse(status=400, body=s)
-    transaction_id = transaction_tag.text.strip()
 
     # try to identify the message type
-    mo_meta = env.find(
-        "./{" + MM7_NAMESPACE['env'] + "}Body/{" + MM7_NAMESPACE['mm7'] + "}DeliverReq"
-    , MM7_NAMESPACE)
+    mo_meta = \
+        env.find("./" + env_ns + "Body/" + mm7_ns + "DeliverReq") or \
+        env.find("./" + env_ns + "Body/" + mm7_ns + "SubmitReq")
     if mo_meta:
         # create a shallow message to send back to the MMSC
         rx = MMSMessage()
@@ -150,12 +159,10 @@ def mm7_inbound(gw):
         # send MM7 response
         return models.gateway.MM7Gateway.build_response("DeliverRsp", transaction_id, rx.id, '1000')
 
-    dr_meta = env.find(
-        "./{" + MM7_NAMESPACE['env'] + "}Body/{" + MM7_NAMESPACE['mm7'] + "}DeliveryReportReq"
-    , MM7_NAMESPACE)
+    dr_meta = env.find("./" + env_ns + "Body/" + mm7_ns + "DeliveryReportReq")
     if dr_meta:
         log.debug("[{}] Incoming message is a DR".format(gw))
-        txid = dr_meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "")
+        txid = dr_meta.findtext("./" + mm7_ns + "MessageID", "")
         if txid is None:
             return models.gateway.MM7Gateway.build_response("DeliveryReportRsp", transaction_id, txid, '4004')
         # find MT message
@@ -215,7 +222,8 @@ class MMSMessage(object):
             self.last_tran_id = str(uuid.uuid4()).replace("-", "")
             self.created_ts = int(time.time())
             self.template = models.template.MMSMessageTemplate(template_id)
-            self.save()
+            if self.template.id is not None:
+                self.save()
         else:
             self.load(message_id)
 
