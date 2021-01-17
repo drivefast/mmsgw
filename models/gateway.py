@@ -143,7 +143,11 @@ def inbound(content_fn, meta_xml=None):
             log.warning("[{}] {} internal error handling received MMS: {}".format(gw.gwid, jid, ex))
             log.debug("[{}] {} traceback: {}".format(gw.gwid, jid, traceback.format_exc()))
     else:
-        handler = MM7_TYPE.get(meta.tag.lower())
+        e = None
+        meta = ET.fromstring(meta_xml)
+        ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
+        tag = meta.tag.replace(ns, "")
+        handler = MM7_TYPE.get(tag.lower())
     log.debug("[{}] {} handling as {} {} message".format(gw.gwid, jid, gw.protocol, handler))
 
     if handler is None:
@@ -260,9 +264,9 @@ class MMSGateway(object):
         self.origin_prefix = cfg['addressing'].get('origin_prefix', "")
         self.origin_suffix = cfg['addressing'].get('origin_suffix', "")
 
-        self.request_ack = cfg['features'].get('request_submit_ack', "").lower() in ("yes", "true", "t", "1")
-        self.request_dr = cfg['features'].get('request_delivery_receipt', "").lower() in ("yes", "true", "t", "1")
-        self.request_rr = cfg['features'].get('request_read_receipt', "").lower() in ("yes", "true", "t", "1")
+        self.request_ack = cfg['features'].get('request_submit_ack', "true").lower() in ("yes", "true", "t", "1")
+        self.request_dr = cfg['features'].get('request_delivery_report', "true").lower() in ("yes", "true", "t", "1")
+        self.request_rr = cfg['features'].get('request_read_receipt', "true").lower() in ("yes", "true", "t", "1")
         self.auto_ack = cfg['features'].get('auto_ack', "true").lower() in ("yes", "true", "t", "1")
         self.auto_dr = cfg['features'].get('auto_dr', "false").lower() in ("yes", "true", "t", "1")
         self.applic_id = cfg['features'].get('applic_id')
@@ -283,6 +287,7 @@ class MM4Gateway(MMSGateway):
     DR_STATUS_MAP = {
         '200': "Retrieved",
         '202': "Forwarded",
+        '400': "Unknown",
         '404': "Unrecognised",
         '406': "Rejected",
         '408': "Expired",
@@ -1207,9 +1212,12 @@ class MM7Gateway(MMSGateway):
         ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
 
         try:
-            rx.origin = rx.template.origin = self._parse_address_list(meta.find("./" + ns + "Sender"))[0]
+            rx.origin = rx.template.origin = (
+                self._parse_address_list(meta.find("./" + ns + "Sender")) + 
+                self._parse_address_list(meta.find("./" + ns + "SenderIdentification/" + ns + "SenderAddress"))
+            )[0]
         except Exception:
-            log.warning("[{}] {} Cannot parse message origination number".format(self.gwid, rx.id))
+            log.warning("[{}] {} Cannot find or parse message origination number".format(self.gwid, rx.id))
         rx.destination = set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "To")))
         rx.cc = set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Cc")))
         rx.bcc = set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Bcc")))
@@ -1224,8 +1232,8 @@ class MM7Gateway(MMSGateway):
                 .format(self.gwid, rx.id)
             )
 
-#        rx.vasid = meta.findtext("./" + ns + "VASID", "")
-#        rx.vaspid = meta.findtext("./" + ns + "VASPID", "")
+        rx.vasid = meta.findtext("./" + ns + "VASID", "")
+        rx.vaspid = meta.findtext("./" + ns + "VASPID", "")
         rx.priority = meta.findtext("./" + ns + "Priority", "")
         rx.linked_id = meta.findtext("./" + ns + "LinkedID", "")
         rx.relay_server = meta.findtext("./" + ns + "MMSRelayServerID", "")
@@ -1291,20 +1299,58 @@ class MM7Gateway(MMSGateway):
 
 
     def process_dr_for_outbound(self, _, meta):
-        log.debug("DLR metadata elements: {}".format(list(meta)))
         ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
-        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
-        mt_status = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MMStatus", "").strip()
-        # process Sender and Recipients/To|Cc|Bcc tags, with Number|ShortCode|RFC2822Address subtags
-        return msgid, None
+        tx = models.message.MMSMessage(rdb.get('mmsxref-' + meta.findtext("./" + ns + "MessageID", "").strip()))
+
+        apply_to = \
+            set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "To"))) | \
+            set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Cc"))) | \
+            set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Bcc")))
+
+        mt_status = meta.findtext("./" + ns + "MMStatus", "").strip().lower()
+        (status, code) = \
+            ("DELIVERED", '200') if mt_status in [ "retrieved" ] else \
+            ("FORWARDED", '202') if mt_status in [ "indeterminate", "forwarded" ] else \
+            ("FAILED", '408') if mt_status in [ "expired" ] else \
+            ("FAILED", '406') if mt_status in [ "rejected", "delivery condition not met" ] else \
+            ("UNDEFINED", '400')
+        status_text = mt_status + ": " + meta.findtext("./" + ns + "StatusText", "")
+        apx = meta.findtext("./" + ns + "ApplicID", "").strip()
+        tx.set_state(list(apply_to), status, code, status_text, self.gwid, self.events_url, 
+            extra={
+                'app': meta.findtext("./" + ns + "ApplicID", "").strip(),
+                'reply_app': meta.findtext("./" + ns + "ReplyApplicID", "").strip(),
+                'app_data': meta.findtext("./" + ns + "AuxApplicInfo", "").strip(),
+            }
+        )
+
+        log.info("[{}] {} Delivery report on MT processed successfully".format(self.gwid, tx.id))
 
 
     def process_rr_for_outbound(self, _, meta):
         ns = meta.tag[meta.tag.find("{"):meta.tag.find("}")+1]
-        msgid = meta.findtext("./{" + MM7_NAMESPACE['mm7'] + "}MessageID", "").strip()
-        return msgid, None
+        tx = models.message.MMSMessage(rdb.get('mmsxref-' + meta.findtext("./" + ns + "MessageID", "").strip()))
 
+        apply_to = \
+            set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "To"))) | \
+            set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Cc"))) | \
+            set(self._parse_address_list(meta.find("./" + ns + "Recipients/" + ns + "Bcc")))
 
+        mt_status = meta.findtext("./" + ns + "MMStatus", "").strip().lower()
+        (status, code) = \
+            ("READ", 200) if mt_status in [ "read" ] else \
+            ("REJECTED", 406) if mt_status in [ "deleted without read" ] else \
+            ("UNDEFINED", 400)
+        code = list(self.DR_STATUS_MAP.keys())[list(self.DR_STATUS_MAP.values()).index(em['X-Mms-MM-Status-Code'])]
+        status_text = mt_status + ": " + meta.findtext("./" + ns + "StatusText", "")
+        tx.set_state(list(apply_to), status, code, status_text, self.gwid, self.events_url,
+            extra={
+                'app': meta.findtext("./" + ns + "ApplicID", "").strip(),
+                'reply_app': meta.findtext("./" + ns + "ReplyApplicID", "").strip(),
+                'app_data': meta.findtext("./" + ns + "AuxApplicInfo", "").strip(),
+            }
+        )
 
+        log.info("[{}] {} Read-reply on MT processed successfully".format(self.gwid, tx.id))
 
 

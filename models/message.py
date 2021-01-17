@@ -159,28 +159,38 @@ def mm7_inbound(gw):
         # send MM7 response
         return models.gateway.MM7Gateway.build_response("DeliverRsp", transaction_id, rx.id, '1000')
 
-    dr_meta = env.find("./" + env_ns + "Body/" + mm7_ns + "DeliveryReportReq")
-    if dr_meta:
-        log.debug("[{}] Incoming message is a DR".format(gw))
-        txid = dr_meta.findtext("./" + mm7_ns + "MessageID", "")
-        if txid is None:
-            return models.gateway.MM7Gateway.build_response("DeliveryReportRsp", transaction_id, txid, '4004')
+    m_meta = \
+        env.find("./" + env_ns + "Body/" + mm7_ns + "DeliveryReportReq") or \
+        env.find("./" + env_ns + "Body/" + mm7_ns + "ReadReplyReq")
+    if m_meta:
+        m_type = m_meta.tag.replace(mm7_ns, "")
+        m_reply_type = "DeliveryReportRsp" if m_meta.tag.replace(mm7_ns, "") else "ReadReplyRsp"
+        log.debug("[{}] Incoming message is a {}".format(gw, m_type))
+        provider_msg_id = m_meta.findtext("./" + mm7_ns + "MessageID", "")
+        if provider_msg_id is None:
+            log.warning("[{}] No MessageID tag found in the {}".format(gw, m_meta))
+            return models.gateway.MM7Gateway.build_response(m_reply_type, transaction_id, "", '4004')
         # find MT message
+        txid = rdb.get('mmsxref-' + provider_msg_id)
+        if txid is None:
+            log.info("[{}] Couldnt find reference to original message for MessageID {}".format(gw, txid))
+            return models.gateway.MM7Gateway.build_response(m_reply_type, transaction_id, provider_msg_id, '2005')
         tx = MMSMessage(txid)
         if tx.id is None:
-            return models.gateway.MM7Gateway.build_response("DeliveryReportRsp", transaction_id, txid, '2005')
+            log.info("[{}] {} Couldnt find original message record for MessageID {}".format(gw, txid))
+            return models.gateway.MM7Gateway.build_response(m_reply_type, transaction_id, provider_msg_id, '2005')
         # schedule DR for processing
         q_rx = rq.Queue("QRX-" + gw, connection=rdbq)
         q_rx.enqueue_call(
-            func='models.gateway.inbound', args=( "", ET.tostring(dr_meta), ), 
+            func='models.gateway.inbound', args=( "", ET.tostring(m_meta), ), 
             job_id=transaction_id,
             meta={ 'retries': MAX_GW_RETRIES },
             ttl=30
         )
         # send MM7 response
-        return models.gateway.MM7Gateway.build_response("DeliveryReportRsp", transaction_id, txid, '1000')
+        return models.gateway.MM7Gateway.build_response(m_reply_type, transaction_id, provider_msg_id, '1000')
 
-    # handling for other MM7 requests (cancel, replace, read-reply, etc) go here 
+    # handling for other MM7 requests (cancel, replace, etc) go here 
 
     log.warning("[{}] Unknown or unhandled message type".format(gw))
     return bottle.HTTPResponse(status=400, body="Unknown or unhandled message type")
@@ -382,8 +392,9 @@ class MMSMessage(object):
 
         # callback to the app if necessary
         s['message'] = self.id
-        q_cb = rq.Queue("QEV", connection=rdbq)
         url_list = set(self.events_url.split(",") + gw_url.split(","))
+        log.debug("[{}] {} sending event to {} with data {}".format(gwid, self.id, url_list, s))
+        q_cb = rq.Queue("QEV", connection=rdbq)
         for url in url_list:
             if url:
                 q_cb.enqueue_call("backend.util.cb_post", ( url, json.dumps(s), ))
