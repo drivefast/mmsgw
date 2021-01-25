@@ -13,7 +13,7 @@ def mms_event():
     return {'type': "event"}
 
 
-# this is the endpoint where your application receives notifications for incoming MOs
+# this is the endpoint where your application receives notifications for incoming messages
 # the mms_received_url setting in the gateway configuration would be handled here
 @bottle.post(URL_ROOT + "example/mms_received")
 def mms_received():
@@ -32,16 +32,14 @@ def mms_received():
             content = "at " + p['content_url']
         log.debug(">>>>>>>> {} ({}): {}".format(p['content_name'], p['content_type'], content))
 
-    # TODO: you need to set this to be the URL of your MMS gateway, that's  where you send 
-    # MO processing events
+    # TODO: you need to set this to be the URL of your MMS gateway, that's where you send 
+    # processing events for incoming messages
     MMSGW_URL = "https://api.mmsgw.org/mmsgw/v1/"
 
-#    if m['ack_requested']:
-    if True:
-    # we need to call the gateway and have it send an ACK for the received message 
-    # to its peer
+    if m['ack_requested']:
+    # MM4: we need to call the gateway and have it send an ACK for the received message to its peer
 
-        # TODO: make your decision on whether you accept or reject the incoming MO, based on 
+        # TODO: make your decision on whether you accept or reject the incoming message, based on 
         #     whatever criteria you care for: destinaton numbers, message content and size, etc
         # your acknowledgement does not have to be synchronous - you may queue it as a task
         #     and send it at a later time
@@ -58,13 +56,13 @@ def mms_received():
             "gateway": m['gateway'],        # the gateway that this message needs to be sent thru
             "message": m['id'],             # our own message ID
             "event_for": m['ack_at_addr'],  # the address to send the event to
-            "provider_ref": m['provider_ref'], # provider's original id (X-Mms-Message-Id)
+            "peer_ref": m['peer_ref'],      # provider's original id (X-Mms-Message-Id)
             "status": status,               # canonical status id
             "description": description,     # verbose description of the status
             #"applies_to": ack_for_numbers  # phone number(s) this status applies to, missing means all
         })
         log.debug(">>>> POST request status {}".format(rp.status_code))
-        # TODO: add error handling
+        # TODO: add error handling, per your app needs
 
     if m['dr_requested']:
     # tell the gateway to transmit a delivery request signal to the network
@@ -79,12 +77,12 @@ def mms_received():
         requests.post(MMSGW_URL + "mms/inbound/dr/" + m['id'], json={
             "gateway": m['gateway'],
             "message": m['id'], 
-            "provider_ref": m['provider_ref'],
+            "peer_ref": m['peer_ref'],
             "status": status, 
             "description": description, 
             "applies_to": dr_for_numbers,
         })
-        # TODO: add error handling
+        # TODO: add error handling, per your app needs
 
 
     if m['rr_requested']:

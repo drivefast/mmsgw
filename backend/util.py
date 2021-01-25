@@ -7,16 +7,15 @@ import bottle
 import datetime
 import requests
 import os, sys
-if sys.version_info.major < 3:
-    from urllib.request import url2pathname
-else:
-    from urllib.request import url2pathname
+from urllib.request import url2pathname
+
+from constants import *
 from backend.logger import log
 
 
 def cb_post(url, jdata):
     log.info(">>>> [callback] POSTing to {}: {}".format(url, jdata))
-    rq = requests.post(url, json=json.loads(jdata))
+    rq = requests.post(url, headers={ 'User-Agent': USER_AGENT }, json=json.loads(jdata))
     if rq.status_code >= 400:
         log.warning(">>>> [callback] POSTing to {} failed with status {}: {}"
             .format(url, rq.status_code, rq.text)
@@ -71,7 +70,7 @@ def download_to_file(url, save_as=None):
     fn = save_as or "/tmp/" + random_string(12)
     rq_session = requests.session()
     rq_session.mount('file://', FileSchemeAdapter())
-    rp = rq_session.get(url, stream=True)
+    rp = rq_session.get(url, headers={ 'User-Agent': USER_AGENT }, stream=True)
     if rp.status_code == 200:
         with open(fn, 'wb') as fh:
             for chunk in rp.iter_content(4096):
@@ -91,12 +90,13 @@ def find_in_dict(d, k):
 
 
 def repo(path, fn):
+    if REPO_SPLIT_PREFIX == 0:
+        return path + fn
     try:
-        if not os.path.isdir(path + fn[:2]):
-            os.mkdir(path + fn[:2])
+        if not os.path.isdir(path + fn[:REPO_SPLIT_PREFIX]):
+            os.mkdir(path + fn[:REPO_SPLIT_PREFIX])
         return path + fn[:2] + "/" + fn
     except Exception as e:
-        log.debug(">>>>>> {}".format(e))
         return None
 
 

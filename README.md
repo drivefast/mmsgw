@@ -168,7 +168,7 @@ The GET method returns the full representation of an outbound or an inbound mess
 
 
 *   <strong><code>id</code></strong> (string): internal unique message ID
-*   <strong><code>provider_ref</code></strong> (string): unique message ID attributed by the upstream provider; outbound messages get a value in this field after the provider acknowledged the message receipt
+*   <strong><code>peer_ref</code></strong> (string): unique message ID attributed by the upstream provider; outbound messages get a value in this field after the provider acknowledged the message receipt
 *   <strong><code>last_tran_id</code></strong> (string): the last transaction ID in the current message transmission dialog
 *   <strong><code>ack_at_addr</code></strong> (string): the provider address where the message receipt needs to be acknowledged
 *   <strong><code>direction</code></strong> (integer): direction of the message, from the mmsgw perspective: -1 for outbound, 1 for inbound 
@@ -212,7 +212,7 @@ Incoming messages (MOs) may require receipt acknowledgements, delivery reports, 
 
 *   <strong><code>gateway</code></strong> (string): the gateway that this message needs to be sent thru
 *   <strong><code>message</code></strong> (string): our own message ID
-*   <strong><code>provider_ref</code></strong> (string): provider's original message id
+*   <strong><code>peer_ref</code></strong> (string): provider's original message id
 *   <strong><code>status</code></strong> (string): canonical status id
 *   <strong><code>description</code></strong> (string): verbose description of the status
 *   <strong><code>applies_to</code></strong> (string, comma separated list of phone numbers): phone number(s) this status applies to; missing means applies to all

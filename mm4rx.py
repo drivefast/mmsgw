@@ -41,7 +41,7 @@ def dispatch(content, sender, receivers, source=None):
     mm4rx_id = str(uuid.uuid4()).replace("-", "")
     
     # move content as file to be processed
-    fn = repo(cfg['general'].get('mm4rx_dir', "/tmp/rx/"), mm4rx_id + ".mm4")
+    fn = repo(TMP_MMS_DIR, mm4rx_id + ".mm4")
     if cfg['general'].get('smtp_host'):
         with open(fn, "wb") as fh:
             fh.write(content)
@@ -105,6 +105,10 @@ if len(sys.argv) < 2:
     exit()
 cfg = configparser.ConfigParser()
 cfg.read(sys.argv[len(sys.argv) - 1])
+
+TMP_MMS_DIR = cfg['general'].get('tmp_dir', "/tmp/mms/")
+if not TMP_MMS_DIR.endswith("/"):
+    TMP_MMS_DIR += "/"
 
 bind_host = cfg['general'].get('smtp_host', '')
 bind_port = int(cfg['general'].get('smtp_port', 25))

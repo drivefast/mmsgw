@@ -1,3 +1,4 @@
+import os
 import time
 import uuid
 import json
@@ -242,7 +243,8 @@ class MMSMessageTemplate(object):
             self.drm = int(tpl.get('drm', -1))
             self.content_adaptation = int(tpl.get('content_adaptation', -1))
             self.can_redistribute = int(tpl.get('can_redistribute', -1))
-            self.parts = tpl.get('parts', "").split(",")
+            parts = tpl.get('parts', "")
+            self.parts = parts.split(",") if parts else []
 
     def as_email(self):
         return None
@@ -294,22 +296,27 @@ class MMSMessageTemplate(object):
     def __repr__(self):
         return json.dumps(self.as_dict())
 
-    def add_part_from_mime(self, ep, url_prefix=None):
+    def add_part_from_mime(self, ep, storage, url_prefix=None):
         p = MMSMessagePart()
-        p.content_name = ep['Content-Id'] if "Content-Id" in ep else p.part_id
+        if "Content-Id" in ep:
+            p.content_name = ep['Content-Id'].replace("<", "").replace(">", "").replace("\"", "").replace("'", "")
+        else:
+            p.content_name = p.part_id
         p.content_type = ep.get_content_type()
         if p.content_type not in ACCEPTED_CONTENT_TYPES:
             return '406', "Content type '{}' not accepted".format(ep['Content-Type'])
-        fn = ep.get_filename("") or (p.content_name + ACCEPTED_CONTENT_TYPES[p.content_type])
+        fn = ep.get_filename("") or p.content_name
         if p.content_type == "application/smil" or p.content_type.startswith("text/"):
             p.content = ep.get_payload(decode=True)
         elif p.content_type.startswith("image/") or p.content_type.startswith("audio/"):
             try:
-                fh = open(repo(TMP_MEDIA_DIR, self.id + "-" + fn), "wb")
+                if os.path.splitext(fn)[-1] not in ACCEPTED_CONTENT_TYPES.values():
+                    fn += ACCEPTED_CONTENT_TYPES[p.content_type]
+                fh = open(repo(storage, self.id + "-" + fn), "wb")
                 fh.write(ep.get_payload(decode=True))
                 fh.close()
             except Exception as e:
-                return '500', "Failed saving file {} in {}: {}".format(fn, TMP_MEDIA_DIR, e)
+                return '500', "Failed saving file {} in {}: {}".format(fn, storage, e)
             p.content_url = (url_prefix or (API_URL + URL_ROOT)) + self.id + "-" + fn
         else:
             return '415', "Content type '{}' not handled".format(p.content_type)

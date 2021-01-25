@@ -4,7 +4,10 @@ import configparser
 
 API_ROOT = os.path.dirname(os.path.realpath(__file__)) + "/"
 URL_ROOT = "/mmsgw/v1/"
+USER_AGENT = URL_ROOT[1:]
 ENABLE_TESTS = True
+
+REPO_SPLIT_PREFIX = 2
 
 LOG_IDENT = "mmsgw"
 LOG_FACILITY = syslog.LOG_LOCAL4
@@ -15,7 +18,7 @@ ACCEPTED_CONTENT_CLASSES = ("text", "image-basic", "image-rich", "video-basic", 
 ACCEPTED_CHARGED_PARTY = ( "sender", "recipient", "both", "neither" )
 ACCEPTED_CONTENT_TYPES = {
     'application/smil': ".smil",
-    'text/plain': ".txt", 
+    'text/plain': ".txt", 'text/html': ".html",
     'image/bmp': ".bmp", 'image/gif': ".gif", 'image/jpeg': ".jpg", 'image/jpg': ".jpg", 'image/tiff': ".tif", 'image/png': ".png",
     'audio/basic': ".au", 'audio/mid': ".mid", 'audio/mpeg': ".mpg", 'audio/mp4': ".mp4", 'audio/wav': ".wav",
 }
@@ -36,18 +39,12 @@ cfg.read(CFG_ROOT + "mmsgw.conf")
 
 API_URL = cfg['general']['api_url']
 API_DEV_PORT = int(cfg['general'].get('api_dev_port', 8080))
-TMP_MEDIA_DIR = cfg['general'].get("media_dir", "/tmp/media/")
-if not TMP_MEDIA_DIR.endswith("/"):
-    TMP_MEDIA_DIR += "/"
-if not os.path.isdir(TMP_MEDIA_DIR):
-    os.mkdir(TMP_MEDIA_DIR)
-    os.chmod(TMP_MEDIA_DIR, int("770", 8))
-MM7RX_DIR = cfg['general'].get("mm7rx_dir", "/tmp/rx/")
-if not MM7RX_DIR.endswith("/"):
-    MM7RX_DIR += "/"
-if not os.path.isdir(MM7RX_DIR):
-    os.mkdir(MM7RX_DIR)
-    os.chmod(MM7RX_DIR, int("770", 8))
+
+TMP_MMS_DIR = cfg['general'].get("tmp_dir", "/tmp/mms/")
+if not TMP_MMS_DIR.endswith("/"):
+    TMP_MMS_DIR += "/"
+if not os.path.isdir(TMP_MMS_DIR):
+    os.mkdir(TMP_MMS_DIR)
 
 MMS_TTL = int(cfg['general'].get('mms_ttl', 4 * 3600))
 MMS_TEMPLATE_TTL = int(cfg['general'].get('mms_template_ttl', 24 * 3600))

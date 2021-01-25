@@ -3,7 +3,6 @@ import time
 import json
 import bottle
 import rq
-import requests
 import email
 import xml.etree.cElementTree as ET
 
@@ -56,7 +55,7 @@ def enqueue_inbound_mms_event(event, rxid):
     # expected format: dictionary with the following keys
     #    gateway: the gateway that this message needs to be sent thru
     #    message: our own message ID
-    #    provider_ref: provider's original message id (X-Mms-Message-Id)
+    #    peer_ref: provider's original message id (X-Mms-Message-Id)
     #    status: canonical status id
     #    description: verbose description of the status
     #    applies_to: phone number(s) this status applies to; missing means applies to all
@@ -65,7 +64,7 @@ def enqueue_inbound_mms_event(event, rxid):
     if \
         ev.get('gateway') is None or \
         ev.get('message') is None or \
-        ev.get('provider_ref') is None or \
+        ev.get('peer_ref') is None or \
         ev.get('status') is None or \
         (event != "ack" and ev.get('event_for') is None) or \
         (event != "ack" and ev.get('applies_to') is None) \
@@ -78,7 +77,7 @@ def enqueue_inbound_mms_event(event, rxid):
     q_ev.enqueue_call(
         func='models.gateway.send_event_for_inbound_mms', 
         args=( 
-            ev['message'], event, ev['provider_ref'],
+            ev['message'], event, ev['peer_ref'],
             ev['status'], ev['description'], 
             ev.get('event_for'), list(ev.get('applies_to', "")), 
         ),
@@ -144,7 +143,7 @@ def mm7_inbound(gw):
         rx.save()
         rx.template.save()
         # save raw content
-        fn = repo(MM7RX_DIR, rx.id + ".mm7")
+        fn = repo(TMP_MMS_DIR, rx.id + ".mm7")
         log.debug("[{}] {} saving media as {}".format(gw, rx.id, transaction_id, fn))
         with open(fn, "w") as fh:
             fh.write(parts[1].as_string())
@@ -173,11 +172,11 @@ def mm7_inbound(gw):
         # find MT message
         txid = rdb.get('mmsxref-' + provider_msg_id)
         if txid is None:
-            log.info("[{}] Couldnt find reference to original message for MessageID {}".format(gw, txid))
+            log.info("[{}] Couldnt find reference to original message for MessageID {}".format(gw, provider_msg_id))
             return models.gateway.MM7Gateway.build_response(m_reply_type, transaction_id, provider_msg_id, '2005')
         tx = MMSMessage(txid)
         if tx.id is None:
-            log.info("[{}] {} Couldnt find original message record for MessageID {}".format(gw, txid))
+            log.info("[{}] {} Couldnt find original message record for MessageID {}".format(gw, provider_msg_id))
             return models.gateway.MM7Gateway.build_response(m_reply_type, transaction_id, provider_msg_id, '2005')
         # schedule DR for processing
         q_rx = rq.Queue("QRX-" + gw, connection=rdbq)
@@ -200,7 +199,7 @@ class MMSMessage(object):
 
     id = None
     template = None
-    provider_ref = ""    # X-MMS-Message-ID if carrier initiated
+    peer_ref = ""        # X-MMS-Message-ID if carrier initiated
     last_tran_id = None  # last X-MMS-Transaction-ID set by carrier
     ack_at_addr = ""
     direction = 0
@@ -241,7 +240,7 @@ class MMSMessage(object):
     def save(self):
         rdb.hmset('mms-' + self.id, {
             'template_id': self.template.id,
-            'provider_ref': self.provider_ref,
+            'peer_ref': self.peer_ref,
             'last_tran_id': self.last_tran_id,
             'ack_at_addr': self.ack_at_addr,
             'direction': self.direction,
@@ -274,7 +273,7 @@ class MMSMessage(object):
         if md:
             self.id = msgid
             self.template = models.template.MMSMessageTemplate(md['template_id'])
-            self.provider_ref = md['provider_ref']
+            self.peer_ref = md['peer_ref']
             self.last_tran_id = md['last_tran_id']
             self.ack_at_addr = md['ack_at_addr']
             self.direction = md['direction']
@@ -306,7 +305,7 @@ class MMSMessage(object):
     def as_dict(self):
         d = {
             'id': self.id,
-            'provider_ref': self.provider_ref,
+            'peer_ref': self.peer_ref,
             'last_tran_id': self.last_tran_id,
             'ack_at_addr': self.ack_at_addr,
             'direction': self.direction,
@@ -353,7 +352,7 @@ class MMSMessage(object):
 
     @classmethod
     def crossref(cls, xref, msgid):
-        rdb.hset("mms-" + msgid, 'provider_ref', xref)
+        rdb.hset("mms-" + msgid, 'peer_ref', xref)
         rdb.set('mmsxref-' + xref, msgid, ex=int(time.time()) + MMS_TTL)
 
 

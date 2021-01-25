@@ -30,7 +30,6 @@ import models.message
 import models.template
 
 
-
 TOP_PART_BOUNDARY = "========Top-Part-Boundary"
 
 THIS_GW = None
@@ -119,7 +118,7 @@ def inbound(content_fn, meta_xml=None):
     handler = ""
     if content_fn:
         try:
-            fn = gw.rx_dir + content_fn[0:2] + "/" + content_fn
+            fn = gw.tmp_dir + content_fn[0:2] + "/" + content_fn
             with open(fn, "r") as fh:
                 e = email.message_from_file(fh)
                 if gw.protocol == "MM4":
@@ -200,6 +199,7 @@ class MMSGateway(object):
     carrier = ""
     active = True
     tps_limit = 0
+    tmp_dir = None
     events_url = ""
 
     # outbound
@@ -213,8 +213,8 @@ class MMSGateway(object):
     # inbound
     this_domain = None   # emails coming from any of these domains will be dispatched to this gateway
     this_host = None
-    rx_dir = None
-    mime_parts_url_prefix = ""
+    media_repo = ""
+    media_url_prefix = ""
     mms_received_url = ""
 
     # addressing
@@ -248,6 +248,7 @@ class MMSGateway(object):
         self.carrier = cfg['gateway'].get('carrier', "")
         self.tps_limit = int(cfg['gateway'].get('tps_limit', 0))
         self.events_url = cfg['gateway'].get('events_url', "")
+        self.tmp_dir = cfg['gateway'].get('tmp_dir', "/tmp/mms/")
 
         self.secure = cfg['outbound'].get('secure_connection', "").lower() in ("yes", "true", "t", "1")
         self.heartbeat = cfg['outbound'].get('heartbeat')
@@ -255,8 +256,8 @@ class MMSGateway(object):
         if len(cfg['outbound'].get('username', "")) > 0 and len(cfg['outbound'].get('password', "")) > 0:
             self.auth = ( cfg['outbound']['username'], cfg['outbound']['password'] )
 
-        self.rx_dir = cfg['inbound'].get('received_content_dir', "/tmp/rx/")
-        self.mime_parts_url_prefix = cfg['inbound'].get('mime_parts_url_prefix', "")
+        self.media_repo = cfg['inbound'].get('media_repo', "/tmp/media/")
+        self.media_url_prefix = cfg['inbound'].get('media_url_prefix', "")
         self.mms_received_url = cfg['inbound'].get('mms_received_url', "")
 
         self.dest_prefix = cfg['addressing'].get('dest_prefix', "")
@@ -430,7 +431,7 @@ class MM4Gateway(MMSGateway):
                 p.content_url.startswith("https://")
             ):
                 # download the media file, unless already exists
-                content = repo(TMP_MEDIA_DIR, tx.template.id + "-" + p.content_name)
+                content = repo(self.tmp_dir, tx.template.id + "-" + p.content_name)
                 if not os.path.exists(content):
                     content = download_to_file(p.content_url, content)
             if not content:
@@ -466,6 +467,7 @@ class MM4Gateway(MMSGateway):
                 mp.add_header("Content-Id", p.content_name)
                 e.attach(mp)
 
+        e.add_header("User-Agent", USER_AGENT)
         e.add_header("X-Mms-3GPP-MMS-Version", self.protocol_version)
         e.add_header("X-Mms-Message-Type", "MM4_forward.REQ")
         e.add_header("X-Mms-Transaction-ID", tx.last_tran_id)
@@ -549,7 +551,7 @@ class MM4Gateway(MMSGateway):
         if "X-Mms-Message-Id" in m:
             rx = models.message.MMSMessage()
             rx.id = mid
-            rx.provider_ref = m['X-Mms-Message-Id'].replace("\"", "")
+            rx.peer_ref = m['X-Mms-Message-Id'].replace("\"", "")
             rx.last_tran_id = m['X-Mms-Transaction-Id'].replace("\"", "")
             rx.ack_at_addr = m['X-Mms-Originator-System'].replace("\"", "")
             rx.direction = 1
@@ -628,9 +630,9 @@ class MM4Gateway(MMSGateway):
             for mp in mime_parts:
                 if mp.is_multipart():
                     ret_code = '400'
-                    ret_desc = "Unexpected multipart in content"
+                    ret_desc = "Unexpected multipart where media content was expected"
                 else:
-                    ret_code, ret_desc = rx.template.add_part_from_mime(mp, self.mime_parts_url_prefix)
+                    ret_code, ret_desc = rx.template.add_part_from_mime(mp, self.media_repo, self.media_url_prefix)
                 if ret_code == '200':
                     p = models.template.MMSMessagePart(rx.template.parts[-1])
                     log.info("[{}] {} Processed {} part '{}' stored as {}".format(
@@ -693,10 +695,11 @@ class MM4Gateway(MMSGateway):
             e['From'] = self.originator_addr
             e['Sender'] = self.originator_addr
             e['To'] = rx.ack_at_addr
+            e.add_header("User-Agent", USER_AGENT)
             e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
             e.add_header('X-Mms-Message-Type', "MM4_forward.RES")
             e.add_header('X-Mms-Transaction-ID', rx.last_tran_id)
-            e.add_header('X-Mms-Message-ID', rx.provider_ref)
+            e.add_header('X-Mms-Message-ID', rx.peer_ref)
             e.add_header('X-Mms-Request-Status-Code', stat)
             e.add_header('X-Mms-Status-Text', status_desc)
             if len(reporting_phone_num):
@@ -722,6 +725,7 @@ class MM4Gateway(MMSGateway):
         e = MIMEText(status_desc)
         e['From'] = self.origin_prefix + reporting_phone_num + self.origin_suffix
         e['Sender'] = self.originator_addr
+        e.add_header("User-Agent", USER_AGENT)
         e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
         e.add_header('X-Mms-Message-Type', "MM4_Delivery_report.REQ")
         e.add_header('X-Mms-Message-ID', ref)
@@ -764,6 +768,7 @@ class MM4Gateway(MMSGateway):
         e = MIMEText(rstatus)
         e['From'] = self.origin_prefix + reporting_phone_num + self.origin_suffix
         e['Sender'] = self.originator_addr
+        e.add_header("User-Agent", USER_AGENT)
         e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
         e.add_header('X-Mms-Message-Type', "MM4_Read_reply_report.REQ")
         e.add_header('X-Mms-Message-ID', ref)
@@ -791,7 +796,7 @@ class MM4Gateway(MMSGateway):
 
 
     def process_ack_for_outbound(self, em, __):
-        txid = em['X-Mms-Message-Id'].replace("\"", "")
+        txid = em.get('X-Mms-Message-Id', "").replace("\"", "")
         log.debug("[{}] {} MT ack: {}".format(self.gwid, txid, em.as_string()))
         tx = models.message.MMSMessage(txid)
         if tx is None:
@@ -810,12 +815,13 @@ class MM4Gateway(MMSGateway):
 
 
     def process_dr_for_outbound(self, em, __):
-        txid = em['X-Mms-Message-Id']
-        tx = models.message.MMSMessage(txid)
-        if tx is None:
-            log.warning("[{}] transaction {} not found".format(self.gwid, txid))
+        txid = em.get('X-Mms-Message-Id', "").replace("\"", "")
+        if txid:
+            tx = models.message.MMSMessage(txid) 
+        if txid is None or tx.id is None:
+            log.warning("[{}] original message with id '{}' not found".format(self.gwid, txid))
             return None
-        log.debug("[{}] processing MT DLR on transaction {}".format(self.gwid, txid))
+        log.debug("[{}] {} processing MT DLR".format(self.gwid, tx.id))
 
         status = \
             "DELIVERED" if em['X-Mms-MM-Status-Code'].lower() in [ "retrieved" ] else \
@@ -823,38 +829,39 @@ class MM4Gateway(MMSGateway):
             "FAILED" if em['X-Mms-MM-Status-Code'].lower() in [ "expired", "rejected", "unrecognised", "unrecognized" ] else \
             "UNDEFINED"
         code = list(self.DR_STATUS_MAP.keys())[list(self.DR_STATUS_MAP.values()).index(em['X-Mms-MM-Status-Code'])]
-        status_text = em['X-Mms-MM-Status-Code'] + " " + em['X-Mms-Status-Text'] + " " + em['X-Mms-MM-Status-Extension']
-        send_to_ua = em['X-Mms-Forward-To-Originator-UA'].lower() == "yes" if em['X-Mms-Forward-To-Originator-UA'] else False 
+        status_text = em['X-Mms-MM-Status-Code'] + " " + em.get('X-Mms-Status-Text', "") + " " + em.get('X-Mms-MM-Status-Extension', "")
+        send_to_ua = em.get('X-Mms-Forward-To-Originator-UA', "").lower() == "yes" if em['X-Mms-Forward-To-Originator-UA'] else False 
         tx.set_state(self._phone_num_from_address(em['To']), status, code, status_text, self.gwid, self.events_url,
             extra={
                 'send_to_UA': send_to_ua, 
                 'app': em['X-Mms-Applic-ID'], 
                 'reply_app': em['X-Mms-Reply-Applic-ID'], 
-                'app_data': em['X-Mms-Aux-Applic-Info'] 
+                'app_data': em['X-Mms-Aux-Applic-Info'],
             }
         )
-        log.info("[{}] MT DLR on {} processed successfully".format(self.gwid, txid))
+        log.info("[{}] MT DLR on {} processed successfully".format(self.gwid, tx.id))
 
         if em['X-Mms-Ack-Request'] is not None and em['X-Mms-Ack-Request'].lower() == "yes":
             if em.get('Sender') is None:
-                log.warning("[{}] {} MT DLR confirmation requested, but no address to send it to".format(self.gwid, txid))
+                log.warning("[{}] {} MT DLR confirmation requested, but no address to send it to".format(self.gwid, tx.id))
                 return
             # provider asks for an ack on the DLR they sent
-            log.info("[{}] {} MT DLR confirmation requested to {}".format(self.gwid, txid, em['Sender']))
+            log.info("[{}] {} MT DLR confirmation requested to {}".format(self.gwid, tx.id, em['Sender']))
             e = MIMEText("")
             e['Date'] = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
             e['From'] = self.originator_addr
             e['Sender'] = self.originator_addr
             e['To'] = em['Sender']
+            e.add_header("User-Agent", USER_AGENT)
             e.add_header('X-Mms-3GPP-MMS-Version', self.protocol_version)
             e.add_header('X-Mms-Message-Type', "MM4_Delivery_report.RES")
             e.add_header('X-Mms-Transaction-ID', em['X-Mms-Transaction-ID'])
             e.add_header('X-Mms-Message-ID', em['X-Mms-Message-ID'])
             e.add_header('X-Mms-Request-Status-Code', "Ok")
             e.add_header('X-Mms-Status-Text', "Delivery report received")
-            ret_code, ret_desc = self.send_to_mmsc(e, txid, self.originator_addr, em['Sender'])
+            ret_code, ret_desc = self.send_to_mmsc(e, tx.id, self.originator_addr, em['Sender'])
             if ret_code is not None:
-                log.warning("[{}] {} MT DLR confirmation failed: {}".format(self.gwid, txid, ret_desc))
+                log.warning("[{}] {} MT DLR confirmation failed: {}".format(self.gwid, tx.id, ret_desc))
 
 
     def process_rr_for_outbound(self, m, _):
@@ -931,7 +938,8 @@ class MM7Gateway(MMSGateway):
         try:
             meth, _, expect = self.heartbeat.partition(" ")
             rp = requests.request(meth or "HEAD", self.connection, 
-                headers={ 'Content-Length': "0" }, auth=self.auth, timeout=GW_HEARTBEAT_TIMER
+                headers={ 'Content-Length': "0", 'User-Agent': USER_AGENT }, 
+                auth=self.auth, timeout=GW_HEARTBEAT_TIMER
             )
             if str(rp.status_code) in (expect, "200"):
                 rdbq.set('gwstat-' + self.gwid, GW_HEARTBEATS,
@@ -1056,7 +1064,7 @@ class MM7Gateway(MMSGateway):
                 p.content_url.startswith("https://")
             ):
                 # download the media file, unless already exists
-                content = repo(TMP_MEDIA_DIR, tx.template.id + "-" + p.content_name)
+                content = repo(self.tmp_dir, tx.template.id + "-" + p.content_name)
                 if not os.path.exists(content):
                     content = download_to_file(p.content_url, content)
             if not content:
@@ -1102,6 +1110,7 @@ class MM7Gateway(MMSGateway):
     def send_to_mmsc(self, payload, msgid, from_addr=None, to_addrs=None):
 
         headers = {
+            'User-Agent': USER_AGENT,
             'SOAPAction': "\"\"",
             'Content-Type': "multipart/related; " +
                 "boundary=\"" + TOP_PART_BOUNDARY + "\"; " +
@@ -1133,7 +1142,7 @@ class MM7Gateway(MMSGateway):
                 .format(self.gwid, msgid, rp.status_code, rp.text)
             )
             if rp.ok:
-                 # bad habit: MM7 does 200 OK responses, but indicate an error
+                 # bad habit: MMSC responds 200 OK, but indicate an error
                  try:
                      env = xmltodict.parse(rp.text)
                  except Exception as e:
@@ -1259,7 +1268,7 @@ class MM7Gateway(MMSGateway):
                     ret_code = '400'
                     ret_desc = "Unexpected multipart in content"
                 else:
-                    ret_code, ret_desc = rx.template.add_part_from_mime(mp, self.mime_parts_url_prefix)
+                    ret_code, ret_desc = rx.template.add_part_from_mime(mp, self.media_repo, self.media_url_prefix)
                 if ret_code == '200':
                     p = models.template.MMSMessagePart(rx.template.parts[-1])
                     log.info("[{}] {} Processed {} part '{}' stored as {}".format(
@@ -1352,5 +1361,6 @@ class MM7Gateway(MMSGateway):
         )
 
         log.info("[{}] {} Read-reply on MT processed successfully".format(self.gwid, tx.id))
+
 
 
