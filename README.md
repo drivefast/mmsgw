@@ -14,8 +14,11 @@ This MMS gateway sends and receives multimedia messages (containing text, images
 
 To send a message, you will first need to prepare a message template to be sent out. A template contains the individual parts of the MMS message, like the picture(s) that need to be sent, the accompanying text, and instructions on how to format the message on the destination device. Large parts, like images, will be referenced with an `http` or a `file` URL - more about this in the next chapter. Once the template was prepared, the application can request an MMS message to be built and sent. The MMS message will be placed in a queue according to its priority, and will be picked up by the appropriate gateway function, formatted according to the MM4 or MM7 protocol, and sent to the carrier / aggregator. After the message was sent, the gateway will start receiving incoming events, like notifications of the message being delivered, or errors occurred during the transmissions. These are (optionally) forwarded as callback REST API requests to your application. 
 
+![Processing outbound messages](mmsgw_outbound.png)
+
 Incoming messages are also received by the gateways. They are parsed, in structures similar to the templates, briefly queued, and eventually communicated to your application via the callback APIs. The parts of the message are made available as `http` as well as `file` URLs. Some of the protocol requirements, like providing a message receipt acknowledgement, can be automated by the gateway, but you can also have the gateway wait for your application to provide the proper response.
 
+![Processing inbound messages](mmsgw_inbound.png)
 
 ### Infrastructure and internal layout
 
