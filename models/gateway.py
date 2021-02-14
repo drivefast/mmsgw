@@ -206,12 +206,10 @@ class MMSGateway(object):
     secure = False
     remote_peer = None       # SMTP remote server for MM4, as ( host, port ) tuple; MMSC URL for MM7
     heartbeat = None         # smtp or http scheme (like HELO or HEAD) to generate a request to the remote host, and expected response code (like 200 or 401)
-    local_host = None        # identification of the local server (fqdn) for MM4; URL to local for MM7
     auth = None              # authentiation to use for transmitting messages, as ( user, password ) tuple
     ssl_certificate = None   # ( keyfile, certfile ) tuple, MM4 only
 
     # inbound
-    this_domain = None   # emails coming from any of these domains will be dispatched to this gateway
     this_host = None
     media_repo = ""
     media_url_prefix = ""
@@ -252,7 +250,6 @@ class MMSGateway(object):
 
         self.secure = cfg['outbound'].get('secure_connection', "").lower() in ("yes", "true", "t", "1")
         self.heartbeat = cfg['outbound'].get('heartbeat')
-        self.local_host = cfg['outbound'].get('local_host', "")
         if len(cfg['outbound'].get('username', "")) > 0 and len(cfg['outbound'].get('password', "")) > 0:
             self.auth = ( cfg['outbound']['username'], cfg['outbound']['password'] )
 
@@ -330,7 +327,6 @@ class MM4Gateway(MMSGateway):
         certfile = cfg['outbound'].get('certfile')
         if keyfile is not None and certfile is not None and self.secure:
             self.ssl_certificate = ( keyfile, certfile )
-        self.this_domain = cfg['inbound'].get('domain')
         self.this_host = cfg['inbound'].get('host')
         self.return_route = cfg['features'].get('return_route')
         self.mmsip_addr = cfg['features'].get('mmsip_address')
@@ -368,9 +364,6 @@ class MM4Gateway(MMSGateway):
         if self.heartbeat:
             rdbq.set('gwstat-' + self.gwid, 1, 3 + GW_HEARTBEAT_TIMER)
         self.connect()
-        # register the gateway to receive inbound messages
-        rdbq.sadd('mmsrxsource-' + self.this_domain, self.gwid)
-        rdbq.sadd('mmsrxsource-' + self.this_host, self.gwid)
         return self.connection is not None
 
 
@@ -899,7 +892,6 @@ MM7_STATUS = {
 
 class MM7Gateway(MMSGateway):
 
-    originator_system = None
     vaspid = None
     vasid = None
     service_code = None
@@ -913,9 +905,9 @@ class MM7Gateway(MMSGateway):
     def config(self, cfg):
         super(MM7Gateway, self).config(cfg)
         self.remote_peer = cfg['outbound'].get('remote_host', "http://localhost/" + URL_ROOT)
-        self.vaspid = cfg['gateway'].get('vaspid')
-        self.vasid = cfg['gateway'].get('vasid')
-        self.service_code = cfg['gateway'].get('service_code')
+        self.vaspid = cfg['gateway'].get('vaspid', "")
+        self.vasid = cfg['gateway'].get('vasid', "")
+        self.service_code = cfg['gateway'].get('service_code', "")
         self.peer_timeout = cfg['outbound'].get('timeout', 10.)
 
 
@@ -924,9 +916,6 @@ class MM7Gateway(MMSGateway):
         self.connection = self.remote_peer
         if self.heartbeat:
             rdbq.set('gwstat-' + self.gwid, 1, 3 + GW_HEARTBEAT_TIMER)
-#        # register the gateway to receive inbound messages
-#        rdbq.sadd('mmsrxsource-' + self.this_domain, self.gwid)
-#        rdbq.sadd('mmsrxsource-' + self.this_host, self.gwid)
         return True
 
 
@@ -982,8 +971,10 @@ class MM7Gateway(MMSGateway):
         ET.SubElement(submit_rq, "MM7Version").text = MM7_VERSION['mm7']
 
         sender = ET.SubElement(submit_rq, "SenderIdentification")
-        ET.SubElement(sender, "VASPID").text = self.vaspid
-        ET.SubElement(sender, "VASID").text = self.vasid
+        if self.vaspid:
+            ET.SubElement(sender, "VASPID").text = self.vaspid
+        if self.vasid:
+            ET.SubElement(sender, "VASID").text = self.vasid
         self._add_address(ET.SubElement(sender, "SenderAddress"), tx.origin, 
             self.origin_prefix, self.origin_suffix
         )
