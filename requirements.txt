@@ -1,4 +1,3 @@
-configparser
 bottle
 requests
 redis
@@ -7,4 +6,3 @@ rq
 pyinotify
 xmltodict
 iso8601
-
